@@ -21,6 +21,7 @@
 #include <memory>
 #include <opencv2/core/core.hpp>
 #include <rclcpp/rclcpp.hpp>
+#include <vector>
 
 namespace event_fourier
 {
@@ -41,12 +42,19 @@ private:
   bool initialize();
   void callbackEvents(EventArrayConstPtr msg);
   void resetState(uint32_t width, uint32_t height);
+  void updateState(
+    const size_t f_idx, const uint16_t x, const uint16_t y, uint64_t t, bool polarity);
+  void publishImage();
+
   // ------ variables ----
-  uint64_t lastTime_{0};
+  rclcpp::Time lastTime_{0};
   uint64_t sliceTime_{0};
   bool useSensorTime_;
   image_transport::Publisher imagePub_;
   rclcpp::Subscription<EventArray>::SharedPtr eventSub_;
+  rclcpp::TimerBase::SharedPtr pubTimer_;
+
+  std::vector<double> freq_;
   complex_t * state_{0};
   double alpha_;
   double alpha2_;  // alpha * alpha
@@ -55,6 +63,7 @@ private:
   uint64_t eventCount_{0};
   uint64_t lastCount_{0};
   uint64_t totTime_{0};
+  std_msgs::msg::Header header_;
 };
 }  // namespace event_fourier
 #endif  // EVENT_FOURIER__EVENT_FOURIER_H_

@@ -60,10 +60,8 @@ bool EventFourier::initialize()
   const size_t EVENT_QUEUE_DEPTH(1000);
   auto qos = rclcpp::QoS(rclcpp::KeepLast(EVENT_QUEUE_DEPTH)).best_effort().durability_volatile();
   useSensorTime_ = this->declare_parameter<bool>("use_sensor_time", true);
-  alpha_ = 1.0 / this->declare_parameter<double>("window_time", 10.0);  // decay constant
-  alpha2_ = alpha_ * alpha_;
   const std::string bag = this->declare_parameter<std::string>("bag_file", "");
-  std::vector<double> default_freq = {7.0, 14.0};
+  std::vector<double> default_freq = {5.0, 7.0};
   freq_ = this->declare_parameter<std::vector<double>>("frequencies", default_freq);
   if (freq_.size() != 2) {
     RCLCPP_ERROR(this->get_logger(), "must specify exactly 2 frequencies!");
@@ -143,7 +141,8 @@ void EventFourier::resetState(uint32_t width, uint32_t height)
           state_[offset + k] = complex_t(0, 0);
         }
         // write frequency and decay constant into image
-        state_[offset + S_OMEGA] = complex_t(alpha_, -2 * M_PI * freq_[f_idx]);
+        const double alpha = 0.1 * freq_[f_idx];
+        state_[offset + S_OMEGA] = complex_t(alpha, -2 * M_PI * freq_[f_idx]);
       }
     }
   }
@@ -153,6 +152,8 @@ void EventFourier::updateState(
   const size_t f_idx, const uint16_t x, const uint16_t y, uint64_t t, bool polarity)
 {
   const size_t offset = ((y * width_ + x) * freq_.size() + f_idx) * S_NUM_FIELDS;
+  const double alpha = state_[offset + S_OMEGA].real();
+  const double alpha2 = alpha * alpha;
   complex_t & t_s = state_[offset + S_T];
   const double t_d = 1e-9 * t;
   const double dt = t_d - t_s.real();
@@ -165,14 +166,14 @@ void EventFourier::updateState(
   const complex_t amjw = state_[offset + S_OMEGA];  // alpha - j * omega
   const double w = -amjw.imag();                    // omega
   const double w2 = w * w;
-  const double a2pw2 = alpha2_ + w2;
+  const double a2pw2 = alpha2 + w2;
   const double a2pw2dt2 = a2pw2 * dt2;  // (alpha^2 + omega^2) * dt^2
-  const double adt = alpha_ * dt;
+  const double adt = alpha * dt;
   const double wdt = w * dt;  // omega * dt
   const double dx = (int)polarity * 2 - 1.0;
   const double expma = exp(-adt);  // TODO: approximate for small adt
-  const double two_aw = 2.0 * alpha_ * w;
-  const double a2mw2 = alpha2_ - w2;
+  const double two_aw = 2.0 * alpha * w;
+  const double a2mw2 = alpha2 - w2;
   const double x_km1 = state_[offset + S_X].real();  // x[k - 1]
   const complex_t expiwdt = complex_t(cos(wdt), sin(wdt));
   if (a2pw2dt2 < 1e-4) {
@@ -194,8 +195,8 @@ void EventFourier::updateState(
     const double expma_sinwdt_m_wdt = expma_sinwdt - wdt;
     const double expma_coswdt_p_adt_m_1 = expma_coswdt + adt - 1;
     const complex_t gdt = a2pw2_inv * complex_t(
-                                        alpha_ + w * expma_sinwdt - alpha_ * expma_coswdt,
-                                        w - alpha_ * expma_sinwdt - w * expma * coswdt);
+                                        alpha + w * expma_sinwdt - alpha * expma_coswdt,
+                                        w - alpha * expma_sinwdt - w * expma * coswdt);
     const complex_t hdt = a2pw2_inv * a2pw2dt_inv *
                           complex_t(
                             a2mw2 * expma_coswdt_p_adt_m_1 - two_aw * expma_sinwdt_m_wdt,

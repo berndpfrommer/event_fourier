@@ -56,8 +56,6 @@ private:
 
   std::vector<double> freq_;
   complex_t * state_{0};
-  double alpha_;
-  double alpha2_;  // alpha * alpha
   uint32_t width_;
   uint32_t height_;
   uint64_t eventCount_{0};

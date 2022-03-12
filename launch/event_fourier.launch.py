@@ -37,7 +37,13 @@ def launch_setup(context, *args, **kwargs):
         parameters=[
             {'use_sensor_time': True,
              'frame_id': '',
-             'bag_file': 'test_bag',
+             'frequencies': [4.0, 150.0],
+#             'roi': [319, 239, 2, 2],
+#             'roi': [315, 235, 10, 10],
+#             'roi': [300, 220, 40, 40],             
+             'roi': [280, 200, 80, 80],
+#             'roi': [0, 0, 640, 480],
+             'bag_file': LaunchConfig('bag_file').perform(context),
              'slice_time': 0.03}],
         remappings=[
             ('~/events', event_topic),
@@ -49,9 +55,11 @@ def launch_setup(context, *args, **kwargs):
 def generate_launch_description():
     """Create slicer node by calling opaque function."""
     return launch.LaunchDescription([
-        LaunchArg('image_topic', default_value=['/event_cam_0/image'],
+        LaunchArg('image_topic', default_value=['/event_camera/image'],
                   description='image topic'),
-        LaunchArg('event_topic', default_value=['/event_cam_0/events'],
+        LaunchArg('event_topic', default_value=['/event_camera/events'],
                   description='event topic'),
+        LaunchArg('bag_file', default_value=[''],
+                  description='name of bag file to read'),
         OpaqueFunction(function=launch_setup)
         ])

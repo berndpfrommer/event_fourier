@@ -28,6 +28,10 @@
 
 enum FIELDS { S_OMEGA, S_T, S_X, S_SUM, S_NUM_FIELDS };
 
+static const uint8_t NUM_FREQ = 2;  // number of frequencies to keep
+
+#define COMPUTE_IMAGE_HIST
+
 namespace event_fourier
 {
 EventFourier::EventFourier(const rclcpp::NodeOptions & options) : Node("event_fourier", options)
@@ -61,12 +65,23 @@ bool EventFourier::initialize()
   auto qos = rclcpp::QoS(rclcpp::KeepLast(EVENT_QUEUE_DEPTH)).best_effort().durability_volatile();
   useSensorTime_ = this->declare_parameter<bool>("use_sensor_time", true);
   const std::string bag = this->declare_parameter<std::string>("bag_file", "");
-  std::vector<double> default_freq = {5.0, 7.0};
+  std::vector<double> default_freq = {3.0, 100.0};
   freq_ = this->declare_parameter<std::vector<double>>("frequencies", default_freq);
+  const std::vector<long> def_roi = {0, 0, 100000, 100000};
+  const std::vector<long> roi = this->declare_parameter<std::vector<long>>("roi", def_roi);
+  roi_ = std::vector<uint32_t>(roi.begin(), roi.end());  // convert to uint32_t
+  if (
+    roi_[0] != def_roi[0] || roi_[1] != def_roi[1] || roi_[2] != def_roi[2] ||
+    roi_[3] != def_roi[3]) {
+    RCLCPP_INFO_STREAM(
+      this->get_logger(),
+      "using roi: (" << roi_[0] << ", " << roi_[1] << ") w: " << roi_[2] << " h: " << roi_[3]);
+  }
   if (freq_.size() != 2) {
     RCLCPP_ERROR(this->get_logger(), "must specify exactly 2 frequencies!");
     return (false);
   }
+  RCLCPP_INFO_STREAM(this->get_logger(), "frequencies: " << freq_[0] << " - " << freq_[1]);
   if (bag.empty()) {
     eventSub_ = this->create_subscription<EventArray>(
       "~/events", qos, std::bind(&EventFourier::callbackEvents, this, std::placeholders::_1));
@@ -84,31 +99,47 @@ bool EventFourier::initialize()
 void EventFourier::publishImage()
 {
   if (imagePub_.getNumSubscribers() != 0 && height_ != 0) {
-    std::vector<cv::Mat> images(3);
-    images[0] = cv::Mat::zeros(height_, width_, CV_8U);  // blue channel is off
-    for (size_t f_idx = 0; f_idx < freq_.size(); f_idx++) {
-      cv::Mat rawImg(height_, width_, CV_64FC1);
-      // copy data into raw image
-      for (uint32_t iy = 0; iy < height_; iy++) {
-        for (uint32_t ix = 0; ix < width_; ix++) {
-          const size_t offset = ((iy * width_ + ix) * freq_.size() + f_idx) * S_NUM_FIELDS;
-          // const complex_t & X = state_[offset + S_X];
-          const complex_t & X = state_[offset + S_SUM];
-          // approximate detrend correction
-          const complex_t X_detrend = state_[offset + S_X] / state_[offset + S_OMEGA];
-          const complex_t X_d = X - X_detrend;
-          rawImg.at<double>(iy, ix) = std::sqrt(X_d.real() * X_d.real() + X_d.imag() * X_d.imag());
-        }
+    const uint8_t f_idx = 0;
+    cv::Mat rawImg(height_, width_, CV_32FC1, static_cast<float>(freq_[0] * 2 * M_PI));
+    // copy data into raw image
+    const uint32_t ix_start = std::max(0u, roi_[0]);
+    const uint32_t iy_start = std::max(0u, roi_[1]);
+    const uint32_t ix_end = std::min(width_, roi_[0] + roi_[2]);
+    const uint32_t iy_end = std::min(height_, roi_[1] + roi_[3]);
+    for (uint32_t iy = iy_start; iy < iy_end; iy++) {
+      for (uint32_t ix = ix_start; ix < ix_end; ix++) {
+        const size_t offset = ((iy * width_ + ix) * NUM_FREQ + f_idx) * S_NUM_FIELDS;
+        // copy dominant frequency into image
+        rawImg.at<float>(iy, ix) = -state_[offset + S_OMEGA].imag();
       }
-      cv::Mat normImg;
-      cv::normalize(rawImg, normImg, 0, 255, cv::NORM_MINMAX, CV_8U);
-      cv::equalizeHist(normImg, images[1 + f_idx]);
     }
-    // merge images
+
+    cv::Mat scaled;
+    const float alpha = 255.0 / (2 * M_PI * (freq_[1] - freq_[0]));
+    cv::convertScaleAbs(rawImg, scaled, alpha, -freq_[0] * 2 * M_PI * alpha);
+    cv::Mat colorImg;
+    cv::applyColorMap(scaled, colorImg, cv::COLORMAP_JET);
     header_.stamp = lastTime_;
-    cv::Mat merged;
-    cv::merge(images, merged);
-    imagePub_.publish(cv_bridge::CvImage(header_, "bgr8", merged).toImageMsg());
+    imagePub_.publish(cv_bridge::CvImage(header_, "bgr8", colorImg).toImageMsg());
+#ifdef COMPUTE_IMAGE_HIST
+    std::cout << "----------------------" << std::endl;
+    int channels[1] = {0};  // only one channel
+    cv::MatND hist;
+    const int hbins = 50;
+    const int histSize[1] = {hbins};
+    const float franges[2] = {
+      static_cast<float>(freq_[0] * 2 * M_PI), static_cast<float>(freq_[1] * 2 * M_PI)};
+    //const double franges[2] = {freq_[0], freq_[1]};
+    const float * ranges[1] = {franges};
+    cv::calcHist(
+      &rawImg, 1 /* num images */, channels, mask_, hist, 1 /* dim of hist */,
+      histSize /* num bins */, ranges /* frequency range */, true /* histogram is uniform */,
+      false /* don't accumulate */);
+    for (int i = 0; i < hbins; i++) {
+      printf(
+        "%6.2f %8.0f\n", freq_[0] + (freq_[1] - freq_[0]) * (float)i / hbins, hist.at<float>(i));
+    }
+#endif
   }
 }
 
@@ -128,30 +159,55 @@ void EventFourier::readEventsFromBag(const std::string & bagName)
   }
 }
 
+void EventFourier::initializeState(uint32_t x, uint32_t y, uint8_t f_idx, double f)
+{
+  const size_t offset = ((y * width_ + x) * NUM_FREQ + f_idx) * S_NUM_FIELDS;
+  // TODO(Bernd): use memset for this
+  for (size_t k = 0; k < S_NUM_FIELDS; k++) {
+    state_[offset + k] = complex_t(0, 0);
+  }
+  // write frequency and decay constant into image
+  const double alpha = 0.1 * f;  // 10 cycles to establish frequency
+  state_[offset + S_OMEGA] = complex_t(alpha, -2 * M_PI * f);
+}
+
+void EventFourier::copyState(uint32_t x, uint32_t y, uint8_t f_src, uint8_t f_dest)
+{
+  const size_t offset_src = ((y * width_ + x) * NUM_FREQ + f_src) * S_NUM_FIELDS;
+  const size_t offset_dest = ((y * width_ + x) * NUM_FREQ + f_dest) * S_NUM_FIELDS;
+  // TODO (Bernd): use memcpy for this
+  for (size_t k = 0; k < S_NUM_FIELDS; k++) {
+    state_[offset_dest + k] = state_[offset_src + k];
+  }
+}
+
 void EventFourier::resetState(uint32_t width, uint32_t height)
 {
   width_ = width;
   height_ = height;
-  state_ = new complex_t[width * height * freq_.size() * S_NUM_FIELDS];
-  for (size_t i = 0; i < height; i++) {
-    for (size_t j = 0; j < width; j++) {
-      for (size_t f_idx = 0; f_idx < freq_.size(); f_idx++) {
-        const size_t offset = ((i * width + j) * freq_.size() + f_idx) * S_NUM_FIELDS;
-        for (size_t k = 0; k < S_NUM_FIELDS; k++) {
-          state_[offset + k] = complex_t(0, 0);
-        }
-        // write frequency and decay constant into image
-        const double alpha = 0.1 * freq_[f_idx];
-        state_[offset + S_OMEGA] = complex_t(alpha, -2 * M_PI * freq_[f_idx]);
+  state_ = new complex_t[width * height * NUM_FREQ * S_NUM_FIELDS];
+  for (size_t iy = 0; iy < height; iy++) {
+    for (size_t ix = 0; ix < width; ix++) {
+      for (uint8_t f_idx = 0; f_idx < NUM_FREQ; f_idx++) {
+        initializeState(ix, iy, f_idx, getRandomFreq());
       }
     }
   }
+#ifdef COMPUTE_IMAGE_HIST
+  if (roi_[0] != 0 || roi_[1] != 0 || roi_[0] + roi_[2] != width_ || roi_[1] + roi_[3] != height_) {
+    // set mask
+    mask_ = cv::Mat::zeros(height_, width_, CV_8U);
+    cv::Rect rect(
+      roi_[0], roi_[1], std::min(roi_[2], width_ - roi_[0]), std::min(roi_[3], height_ - roi_[1]));
+    mask_(rect) = 1;
+  }
+#endif
 }
 
 void EventFourier::updateState(
-  const size_t f_idx, const uint16_t x, const uint16_t y, uint64_t t, bool polarity)
+  const uint8_t f_idx, const uint16_t x, const uint16_t y, uint64_t t, bool polarity)
 {
-  const size_t offset = ((y * width_ + x) * freq_.size() + f_idx) * S_NUM_FIELDS;
+  const size_t offset = ((y * width_ + x) * NUM_FREQ + f_idx) * S_NUM_FIELDS;
   const double alpha = state_[offset + S_OMEGA].real();
   const double alpha2 = alpha * alpha;
   complex_t & t_s = state_[offset + S_T];
@@ -231,8 +287,28 @@ void EventFourier::callbackEvents(EventArrayConstPtr msg)
     uint64_t t;
     uint16_t x, y;
     const bool polarity = event_array_msgs::mono::decode_t_x_y_p(p, time_base, &t, &x, &y);
-    for (size_t f_idx = 0; f_idx < freq_.size(); f_idx++) {
+    for (uint8_t f_idx = 0; f_idx < NUM_FREQ; f_idx++) {
       updateState(f_idx, x, y, t, polarity);
+    }
+    double amplitude[NUM_FREQ];
+    double dta[NUM_FREQ];
+    for (uint8_t f_idx = 0; f_idx < NUM_FREQ; f_idx++) {
+      const size_t offset = ((y * width_ + x) * NUM_FREQ + f_idx) * S_NUM_FIELDS;
+      const complex_t & X = state_[offset + S_SUM];
+      //// approximate detrend correction
+      const complex_t X_detrend = state_[offset + S_X] / state_[offset + S_OMEGA];
+      const complex_t X_d = X - X_detrend;
+      amplitude[f_idx] = X_d.real() * X_d.real() + X_d.imag() * X_d.imag();
+      // T: total time elapsed
+      const double T = state_[offset + S_T].real() - state_[offset + S_T].imag();
+      dta[f_idx] = state_[offset + S_OMEGA].real() * T;
+    }
+    // if amplitude of test frequency is higher, use that
+    if (dta[0] > 1.0 && dta[1] > 1.0 && amplitude[1] > amplitude[0]) {
+      // transfer state from slot 1 -> 0
+      copyState(x, y, 1, 0);
+      // restart trial with random frequency;
+      initializeState(x, y, 1, getRandomFreq());
     }
   }
   const auto t_end = std::chrono::high_resolution_clock::now();

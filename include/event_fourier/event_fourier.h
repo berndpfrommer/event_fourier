@@ -16,6 +16,9 @@
 #ifndef EVENT_FOURIER__EVENT_FOURIER_H_
 #define EVENT_FOURIER__EVENT_FOURIER_H_
 
+#include <stdlib.h>
+
+#include <cstdlib>
 #include <event_array_msgs/msg/event_array.hpp>
 #include <image_transport/image_transport.hpp>
 #include <memory>
@@ -43,8 +46,14 @@ private:
   void callbackEvents(EventArrayConstPtr msg);
   void resetState(uint32_t width, uint32_t height);
   void updateState(
-    const size_t f_idx, const uint16_t x, const uint16_t y, uint64_t t, bool polarity);
+    const uint8_t f_idx, const uint16_t x, const uint16_t y, uint64_t t, bool polarity);
   void publishImage();
+  inline double getRandomFreq() const
+  {
+    return (((double)std::rand() / RAND_MAX) * (freq_[1] - freq_[0]) + freq_[0]);
+  }
+  void copyState(uint32_t x, uint32_t y, uint8_t f_src, uint8_t f_dest);
+  void initializeState(uint32_t x, uint32_t y, uint8_t f_idx, double f);
 
   // ------ variables ----
   rclcpp::Time lastTime_{0};
@@ -55,6 +64,8 @@ private:
   rclcpp::TimerBase::SharedPtr pubTimer_;
 
   std::vector<double> freq_;
+  std::vector<uint32_t> roi_;
+  cv::Mat mask_;
   complex_t * state_{0};
   uint32_t width_;
   uint32_t height_;

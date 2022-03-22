@@ -31,6 +31,7 @@ namespace event_fourier
 class EventFourier : public rclcpp::Node
 {
 public:
+  typedef std::complex<double> complex_t;
   explicit EventFourier(const rclcpp::NodeOptions & options);
   ~EventFourier();
 
@@ -40,7 +41,6 @@ public:
 private:
   using EventArray = event_array_msgs::msg::EventArray;
   using EventArrayConstPtr = EventArray::ConstSharedPtr;
-  typedef std::complex<double> complex_t;
   void readEventsFromBag(const std::string & bagName);
   bool initialize();
   void callbackEvents(EventArrayConstPtr msg);
@@ -53,7 +53,12 @@ private:
     return (((double)std::rand() / RAND_MAX) * (freq_[1] - freq_[0]) + freq_[0]);
   }
   void copyState(uint32_t x, uint32_t y, uint8_t f_src, uint8_t f_dest);
+  void copyState(
+    uint32_t x_src, uint32_t y_src, uint8_t f_src, uint32_t x_dest, uint32_t y_dest,
+    uint8_t f_dest);
+
   void initializeState(uint32_t x, uint32_t y, uint8_t f_idx, double f);
+  void printFrequencies();
 
   // ------ variables ----
   rclcpp::Time lastTime_{0};
@@ -65,6 +70,7 @@ private:
 
   std::vector<double> freq_;
   std::vector<uint32_t> roi_;
+  double windowSizeInCycles_{50.0};
   cv::Mat mask_;
   complex_t * state_{0};
   uint32_t width_;

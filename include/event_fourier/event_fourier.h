@@ -78,6 +78,7 @@ private:
   uint64_t eventCount_{0};
   uint64_t lastCount_{0};
   uint64_t totTime_{0};
+  uint64_t lastEventTime_;
   std_msgs::msg::Header header_;
 };
 }  // namespace event_fourier

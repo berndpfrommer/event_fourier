@@ -60,7 +60,7 @@ bool EventFourier::initialize()
   qosProf.lifespan.nsec = 0;
   qosProf.liveliness_lease_duration.sec = 10;  // time to declare client dead
   qosProf.liveliness_lease_duration.nsec = 0;
-  imagePub_ = image_transport::create_publisher(this, "~/image", qosProf);
+  imagePub_ = image_transport::create_publisher(this, "~/frequency_image", qosProf);
   sliceTime_ =
     static_cast<uint64_t>((std::abs(this->declare_parameter<double>("slice_time", 0.025) * 1e9)));
   const size_t EVENT_QUEUE_DEPTH(1000);
@@ -70,7 +70,7 @@ bool EventFourier::initialize()
   RCLCPP_INFO_STREAM(this->get_logger(), "window size in cycles: " << windowSizeInCycles_);
   const std::string bag = this->declare_parameter<std::string>("bag_file", "");
   std::vector<double> default_freq = {3.0, 100.0};
-  freq_ = this->declare_parameter<std::vector<double>>("frequencies", default_freq);
+  freq_ = this->declare_parameter<std::vector<double>>("frequency_range", default_freq);
   const std::vector<long> def_roi = {0, 0, 100000, 100000};
   const std::vector<long> roi = this->declare_parameter<std::vector<long>>("roi", def_roi);
   roi_ = std::vector<uint32_t>(roi.begin(), roi.end());  // convert to uint32_t
@@ -125,7 +125,9 @@ void EventFourier::printFrequencies()
 void EventFourier::publishImage()
 {
   if (imagePub_.getNumSubscribers() != 0 && height_ != 0) {
-    const uint8_t f_idx = 0;
+    const double lastEventTime = 1e-9 * lastEventTime_;
+    const double invalidOmega = freq_[0] * 2 * M_PI;
+    constexpr uint8_t f_idx = 0;
     cv::Mat rawImg(height_, width_, CV_32FC1, static_cast<float>(freq_[0] * 2 * M_PI));
     // copy data into raw image
     const uint32_t ix_start = std::max(0u, roi_[0]);
@@ -135,8 +137,14 @@ void EventFourier::publishImage()
     for (uint32_t iy = iy_start; iy < iy_end; iy++) {
       for (uint32_t ix = ix_start; ix < ix_end; ix++) {
         const size_t offset = ((iy * width_ + ix) * NUM_FREQ + f_idx) * S_NUM_FIELDS;
-        // copy dominant frequency into image
-        rawImg.at<float>(iy, ix) = -state_[offset + S_OMEGA].imag();
+        // dt: time of no update for this pixel
+        const double dt = lastEventTime - state_[offset + S_T].real();
+        const double omega = -state_[offset + S_OMEGA].imag();
+        const bool isStale = dt * omega > 10;  // if no events for 10 cycles declare pixel bad;
+        const bool isValid = state_[offset + S_AMP2].imag() > 1.0 && !isStale;
+        // copy dominant frequency into image or minimum frequency (invalid omega) if
+        // pixel has not been updated in a long while
+        rawImg.at<float>(iy, ix) = isValid ? omega : invalidOmega;
       }
     }
 
@@ -406,11 +414,13 @@ void EventFourier::callbackEvents(EventArrayConstPtr msg)
   const uint8_t * p_base = &msg->events[0];
 
   bool frequencyChanged(false);
+  uint64_t lastEventTime(0);
   for (const uint8_t * p = p_base + start_event; p < p_base + msg->events.size();
        p += BYTES_PER_EVENT) {
     uint64_t t;
     uint16_t x, y;
     const bool polarity = event_array_msgs::mono::decode_t_x_y_p(p, time_base, &t, &x, &y);
+    lastEventTime = t;
     for (uint8_t f_idx = 0; f_idx < NUM_FREQ; f_idx++) {
       updateState(f_idx, x, y, t, polarity);
     }
@@ -459,9 +469,14 @@ void EventFourier::callbackEvents(EventArrayConstPtr msg)
       }
 #endif
   }
+#ifdef DEBUG_FREQ_CHANGE
   if (frequencyChanged) {
     printFrequencies();
   }
+#else
+  (void)frequencyChanged;
+#endif
+  lastEventTime_ = lastEventTime;
   const auto t_end = std::chrono::high_resolution_clock::now();
   totTime_ += std::chrono::duration_cast<std::chrono::microseconds>(t_end - t_start).count();
   if (eventCount_ > lastCount_ + 10000000) {

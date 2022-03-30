@@ -82,7 +82,7 @@ bool EventFourier::initialize()
       "using roi: (" << roi_[0] << ", " << roi_[1] << ") w: " << roi_[2] << " h: " << roi_[3]);
   }
   if (freq_.size() != 2) {
-    RCLCPP_ERROR(this->get_logger(), "must specify exactly 2 frequencies!");
+    RCLCPP_ERROR(this->get_logger(), "frequency range must have exactly 2 elements!");
     return (false);
   }
   RCLCPP_INFO_STREAM(this->get_logger(), "frequencies: " << freq_[0] << " - " << freq_[1]);
@@ -92,7 +92,8 @@ bool EventFourier::initialize()
     double T = 1.0 / std::max(this->declare_parameter<double>("publishing_frequency", 20.0), 1.0);
     pubTimer_ = rclcpp::create_timer(
       this, this->get_clock(), rclcpp::Duration::from_seconds(T), [=]() { this->publishImage(); });
-
+    statsTimer_ = rclcpp::create_timer(
+      this, this->get_clock(), rclcpp::Duration::from_seconds(2.0), [=]() { this->statistics(); });
   } else {
     // reading from bag is for debugging...
     readEventsFromBag(bag);
@@ -233,15 +234,7 @@ void EventFourier::resetState(uint32_t width, uint32_t height)
   for (size_t iy = 0; iy < height; iy++) {
     for (size_t ix = 0; ix < width; ix++) {
       for (uint8_t f_idx = 0; f_idx < NUM_FREQ; f_idx++) {
-#if 0        
-        if (ix == 319 and iy == 239) {
-          initializeState(ix, iy, f_idx, 2000.0);
-        } else {
-          initializeState(ix, iy, f_idx, getRandomFreq());
-        }
-#else
         initializeState(ix, iy, f_idx, getRandomFreq());
-#endif
       }
     }
   }
@@ -299,12 +292,6 @@ void EventFourier::updateState(
   const double a2mw2 = alpha2 - w2;
   const double x_km1 = state_[offset + S_X].real();  // x[k - 1]
   const complex_t expiwdt = complex_t(cos(wdt), sin(wdt));
-#ifdef DEBUG
-  if (f_idx == 0 && x == 319 && y == 239) {
-    std::cout << "t: " << std::setprecision(8) << t_d << " dt: " << dt << " dx: " << dx
-              << " adt: " << adt << " wdt: " << wdt;
-  }
-#endif
   if (a2pw2dt2 < 1e-4) {
     // we are using some complex arithmetic here
     const complex_t s = amjw * dt;  // (alpha - j * omega) * dt
@@ -313,12 +300,6 @@ void EventFourier::updateState(
     const complex_t h = complex_t(0.5, 0) - 0.16666666667 * s + 0.04166666667 * s2;
     const complex_t d = dt * (x_km1 * g + dx * h);
     state_[offset + S_SUM] = d + expma * expiwdt * state_[offset + S_SUM];
-#ifdef DEBUG
-    if (f_idx == 0 && x == 319 && y == 239) {
-      std::cout << " sum: " << state_[offset + S_SUM] << " d(app): " << d
-                << " oldsum: " << expma * expiwdt * state_[offset + S_SUM] << std::endl;
-    }
-#endif
   } else {
     // use mostly real arithmetic here
     const double a2pw2_inv = 1.0 / a2pw2;  // common
@@ -338,29 +319,9 @@ void EventFourier::updateState(
                             a2mw2 * expma_sinwdt_m_wdt + two_aw * expma_coswdt_p_adt_m_1);
     const complex_t d = x_km1 * gdt + dx * hdt;
     state_[offset + S_SUM] = d + expma * expiwdt * state_[offset + S_SUM];
-#ifdef DEBUG
-    if (f_idx == 0 && x == 319 && y == 239) {
-      std::cout << " sum: " << state_[offset + S_SUM] << " d(exa): " << d
-                << " oldsum: " << expma * expiwdt * state_[offset + S_SUM] << std::endl;
-      std::cout << "   a2pw2_inv:  " << a2pw2_inv << std::endl;
-      std::cout << "   a2p2dt_inv: " << a2pw2dt_inv << std::endl;
-      std::cout << "   sinwdt: " << sinwdt << std::endl;
-      std::cout << "   coswdt: " << coswdt << std::endl;
-      std::cout << "   expma: " << expma << std::endl;
-      std::cout << "   x_km1: " << x_km1 << std::endl;
-      std::cout << "   dx: " << dx << std::endl;
-      std::cout << " exact: gdt: " << gdt << " hdt: " << hdt << " d: " << d << std::endl;
-    }
-#endif
   }
   complex_t & x_k = state_[offset + S_X];
   x_k.real(x_k.real() + dx);  // update x[k - 1] -> x[k]
-#ifdef DEBUG
-  if (f_idx == 0 && x == 319 && y == 239) {
-    std::cout << " updated x to " << state_[offset + S_X].real() << " by: " << dx << std::endl;
-    std::cout << t_d << " updated STATE SUM to " << state_[offset + S_SUM] << std::endl;
-  }
-#endif
   //
   // -----------  detrend and compute amplitude squared ---------------
   //
@@ -384,21 +345,13 @@ void EventFourier::updateState(
     // update amplitude
     state_[offset + S_AMP2].real(X_d.real() * X_d.real() + X_d.imag() * X_d.imag());
   }
-
   // store elapsed_time * alpha which counts number of cycles
   state_[offset + S_AMP2].imag(adT);
-
-#ifdef DEBUG
-  if (f_idx == 0 && x == 319 && y == 239) {
-    //std::cout << "   amp2: " << state_[offset + S_AMP2] << std::endl;
-    std::cout << t_d << " updated STATE SUM to " << state_[offset + S_SUM]
-              << " amp2: " << state_[offset + S_AMP2].real() << std::endl;
-  }
-#endif
 }
 
 void EventFourier::callbackEvents(EventArrayConstPtr msg)
 {
+  const auto t_start = std::chrono::high_resolution_clock::now();
   const auto time_base =
     useSensorTime_ ? msg->time_base : rclcpp::Time(msg->header.stamp).nanoseconds();
   lastTime_ = rclcpp::Time(msg->header.stamp);
@@ -407,10 +360,13 @@ void EventFourier::callbackEvents(EventArrayConstPtr msg)
   if (state_ == 0) {
     resetState(msg->width, msg->height);
     header_ = msg->header;  // copy frame id
+    lastSeq_ = msg->seq - 1;
   }
-  eventCount_ += msg->events.size();
+  eventCount_ += msg->events.size() >> 3;
+  msgCount_++;
+  droppedSeq_ += static_cast<int64_t>(msg->seq) - lastSeq_ - 1;
+  lastSeq_ = static_cast<int64_t>(msg->seq);
 
-  const auto t_start = std::chrono::high_resolution_clock::now();
   const uint8_t * p_base = &msg->events[0];
 
   bool frequencyChanged(false);
@@ -434,11 +390,6 @@ void EventFourier::callbackEvents(EventArrayConstPtr msg)
         if (amp_1.real() > amp_0.real()) {
           // amplitude of test freq is higher than reference freq, set ref_freq = test_freq
           // transfer state from slot 1 -> 0
-#ifdef DEBUG
-          if (x == 319 && y == 239) {
-            std::cout << "XXX overwriting freq!" << std::endl;
-          }
-#endif
           copyState(x, y, 1, 0);
           // restart test frequency with random frequency;
           initializeState(x, y, 1, getRandomFreq());
@@ -448,26 +399,6 @@ void EventFourier::callbackEvents(EventArrayConstPtr msg)
         }
       }
     }
-
-#if 0
-      else {
-        // if any of the neighboring ref frequencies has higher amplitude, use that one.
-        for (uint32_t iy = std::max(static_cast<uint32_t>(y) - 1, 0u);
-             iy < std::min(static_cast<uint32_t>(y) + 2, height_); iy++) {
-          for (uint32_t ix = std::max(static_cast<uint32_t>(x) - 1, 0u);
-               ix < std::min(static_cast<uint32_t>(x) + 2, width_); ix++) {
-            const size_t off = ((iy * width_ + ix) * NUM_FREQ) * S_NUM_FIELDS;
-            const complex_t & amp = state_[off + S_AMP2];
-            if (amp.imag() > 1.0 && amp.real() > amp_0.real()) {
-              // transfer state from neighboring pixel
-              // copyState(ix, iy, 0, x, y, 0);
-              // restart with neighbor's frequency
-              initializeState(x, y, 0, -state_[off + S_OMEGA].imag() / (2.0 * M_PI));
-            }
-          }
-        }
-      }
-#endif
   }
 #ifdef DEBUG_FREQ_CHANGE
   if (frequencyChanged) {
@@ -479,9 +410,20 @@ void EventFourier::callbackEvents(EventArrayConstPtr msg)
   lastEventTime_ = lastEventTime;
   const auto t_end = std::chrono::high_resolution_clock::now();
   totTime_ += std::chrono::duration_cast<std::chrono::microseconds>(t_end - t_start).count();
-  if (eventCount_ > lastCount_ + 10000000) {
-    std::cout << "avg perf: " << double(eventCount_) / double(totTime_) << std::endl;
-    lastCount_ = eventCount_;
+}
+
+void EventFourier::statistics()
+{
+  if (eventCount_ > 0 && totTime_ > 0) {
+    const double usec = static_cast<double>(totTime_);
+    RCLCPP_INFO(
+      this->get_logger(), "%6.2f Mev/s, %8.2f msgs/s, %8.2f usec/ev  %6.0f usec/msg, drop: %3ld",
+      double(eventCount_) / usec, msgCount_ * 1.0e6 / usec, usec / (double)eventCount_,
+      usec / msgCount_, droppedSeq_);
+    eventCount_ = 0;
+    totTime_ = 0;
+    msgCount_ = 0;
+    droppedSeq_ = 0;
   }
 }
 

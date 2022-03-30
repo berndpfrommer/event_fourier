@@ -42,10 +42,10 @@ def launch_setup(context, *args, **kwargs):
              'frequency_range': [900.0, 2100.0],
 #             'roi': [319, 239, 2, 2],
 #             'roi': [315, 235, 10, 10],
-#             'roi': [300, 220, 40, 40],             
+             'roi': [300, 220, 40, 40],             
 #             'roi': [280, 200, 80, 80],
 #             'roi': [0, 0, 640, 480],
-             'bag_file': LaunchConfig('bag_file').perform(context),
+#             'bag_file': LaunchConfig('bag_file').perform(context),
              'slice_time': 0.03}],
         remappings=[
             ('~/events', event_topic),

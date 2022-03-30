@@ -48,6 +48,7 @@ private:
   void updateState(
     const uint8_t f_idx, const uint16_t x, const uint16_t y, uint64_t t, bool polarity);
   void publishImage();
+  void statistics();
   inline double getRandomFreq() const
   {
     return (((double)std::rand() / RAND_MAX) * (freq_[1] - freq_[0]) + freq_[0]);
@@ -67,6 +68,7 @@ private:
   image_transport::Publisher imagePub_;
   rclcpp::Subscription<EventArray>::SharedPtr eventSub_;
   rclcpp::TimerBase::SharedPtr pubTimer_;
+  rclcpp::TimerBase::SharedPtr statsTimer_;
 
   std::vector<double> freq_;
   std::vector<uint32_t> roi_;
@@ -76,9 +78,12 @@ private:
   uint32_t width_;
   uint32_t height_;
   uint64_t eventCount_{0};
+  uint64_t msgCount_{0};
   uint64_t lastCount_{0};
   uint64_t totTime_{0};
   uint64_t lastEventTime_;
+  int64_t lastSeq_{0};
+  int64_t droppedSeq_{0};
   std_msgs::msg::Header header_;
 };
 }  // namespace event_fourier

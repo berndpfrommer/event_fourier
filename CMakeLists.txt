@@ -17,6 +17,7 @@ cmake_minimum_required(VERSION 3.5)
 project(event_fourier)
 
 add_compile_options(-Wall -Wextra -Wpedantic -Werror)
+#add_compile_options(-Wall -Wextra -Wpedantic)
 
 # find dependencies
 find_package(ament_cmake REQUIRED)
@@ -52,6 +53,19 @@ rclcpp_components_register_nodes(event_fourier "event_fourier::EventFourier")
 ament_auto_add_executable(event_fourier_node
   src/event_fourier_node.cpp)
 
+#
+# ---- frequency_cam shared library/component
+#
+ament_auto_add_library(frequency_cam SHARED
+  src/frequency_cam.cpp
+  )
+
+rclcpp_components_register_nodes(frequency_cam "event_fourier::FrequencyCam")
+
+ament_auto_add_executable(frequency_cam_node
+  src/frequency_cam_node.cpp
+  )
+
 
 # -------- installation
 
@@ -60,6 +74,7 @@ ament_auto_add_executable(event_fourier_node
 
 install(TARGETS
   event_fourier
+  frequency_cam
   DESTINATION lib
 )
 
@@ -68,6 +83,7 @@ install(TARGETS
 
 install(TARGETS
   event_fourier_node
+  frequency_cam_node
   DESTINATION lib/${PROJECT_NAME}/)
 
 # install launch files

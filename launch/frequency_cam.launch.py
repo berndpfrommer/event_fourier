@@ -37,9 +37,10 @@ def launch_setup(context, *args, **kwargs):
         parameters=[
             {'use_sensor_time': True,
              'frame_id': '',
-#             'frequency_range': [4.0, 2500.0],
+             'min_frequency': 0.0,
+             'max_frequency': 202.0,
 #             'roi': [319, 239, 2, 2],
-             'roi': [315, 235, 10, 10],
+#             'roi': [315, 235, 10, 10],
 #             'roi': [300, 220, 40, 40],             
 #             'roi': [280, 200, 80, 80],
 #             'roi': [0, 0, 640, 480],

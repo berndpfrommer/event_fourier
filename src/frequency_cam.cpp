@@ -29,6 +29,7 @@
 
 //#define DEBUG
 #define DEBUG_FREQ
+#define PRODUCTION
 
 namespace event_fourier
 {
@@ -53,8 +54,8 @@ FrequencyCam::~FrequencyCam() { delete[] state_; }
 
 bool FrequencyCam::initialize()
 {
-  const size_t imageQueueSize = 4;
   rmw_qos_profile_t qosProf = rmw_qos_profile_default;
+#if 0  
   qosProf.history = RMW_QOS_POLICY_HISTORY_KEEP_LAST;
   qosProf.depth = imageQueueSize;  // keep at most this number of images
   qosProf.reliability = RMW_QOS_POLICY_RELIABILITY_SYSTEM_DEFAULT;
@@ -65,6 +66,7 @@ bool FrequencyCam::initialize()
   qosProf.lifespan.nsec = 0;
   qosProf.liveliness_lease_duration.sec = 10;  // time to declare client dead
   qosProf.liveliness_lease_duration.nsec = 0;
+#endif
   imagePub_ = image_transport::create_publisher(this, "~/frequency_image", qosProf);
   sliceTime_ =
     static_cast<uint64_t>((std::abs(this->declare_parameter<double>("slice_time", 0.025) * 1e9)));
@@ -75,6 +77,13 @@ bool FrequencyCam::initialize()
   const std::vector<long> def_roi = {0, 0, 100000, 100000};
   const std::vector<long> roi = this->declare_parameter<std::vector<long>>("roi", def_roi);
   roi_ = std::vector<uint32_t>(roi.begin(), roi.end());  // convert to uint32_t
+  freq_[0] = this->declare_parameter<double>("min_frequency", 0.0);
+  freq_[1] = this->declare_parameter<double>("max_frequency", 0.0);
+  RCLCPP_INFO_STREAM(this->get_logger(), "minimum frequency: " << freq_[0]);
+  if (freq_[1] > 0) {
+    RCLCPP_INFO_STREAM(this->get_logger(), "maximum frequency: " << freq_[1]);
+  }
+
   if (
     roi_[0] != def_roi[0] || roi_[1] != def_roi[1] || roi_[2] != def_roi[2] ||
     roi_[3] != def_roi[3]) {
@@ -113,7 +122,7 @@ cv::Mat FrequencyCam::makeRawFrequencyImage() const
       const bool isStale = dt > 1.0;  // if no events for certain time, no valid!
       const bool isValid = state.omega > 0 && !isStale;
       rawImg.at<float>(iy, ix) =
-        isValid ? state.omega * (pi2_inv / std::max(state.dt_avg, 1.e-8f)) : 0;
+        isValid ? state.omega * (pi2_inv / std::max(state.dt_avg, 1.e-8f)) : freq_[0];
 #else
       (void)lastEventTime;
       rawImg.at<float>(iy, ix) = state.omega * pi2_inv;
@@ -127,14 +136,27 @@ void FrequencyCam::publishImage()
 {
   if (imagePub_.getNumSubscribers() != 0 && height_ != 0) {
     cv::Mat rawImg = makeRawFrequencyImage();
-
     cv::Mat scaled;
-    double minVal, maxVal;
-    cv::Point minLoc, maxLoc;
-    cv::minMaxLoc(rawImg, &minVal, &maxVal, &minLoc, &maxLoc);
-    std::cout << "min: " << minVal << " max: " << maxVal << std::endl;
-    minVal = 0;
-    double range = maxVal - minVal;
+    double range;
+    double minVal;
+    if (freq_[0] >= 0 && freq_[1] > freq_[0]) {
+      // fixed frequency-to-color mapping
+      minVal = freq_[0];
+      range = freq_[1] - freq_[0];
+    } else {
+      // auto-scale frequency-to-color mapping
+      double maxVal;
+      cv::Point minLoc, maxLoc;
+      cv::minMaxLoc(rawImg, &minVal, &maxVal, &minLoc, &maxLoc);
+      std::cout << "min: " << minVal << " max: " << maxVal << std::endl;
+      if (freq_[0] > 0) {
+        minVal = freq_[0];
+      }
+      if (freq_[1] > 0) {
+        maxVal = freq_[0];
+      }
+      range = maxVal - minVal;
+    }
     cv::convertScaleAbs(rawImg, scaled, 255.0 / range, -minVal * 255.0 / range);
     //const float alpha = 255.0 / (2 * M_PI * (freq_[1] - freq_[0]));
     //cv::convertScaleAbs(rawImg, scaled, alpha, -freq_[0] * 2 * M_PI * alpha);
@@ -167,7 +189,7 @@ void FrequencyCam::readEventsFromBag(const std::string & bagName)
     }
 #endif
 #ifdef DEBUG_FREQ
-    if (eventCount_ > lastCount + 1000000) {
+    if (eventCount_ > lastCount + 10000) {
       cv::Mat rawImg = makeRawFrequencyImage();
       for (uint32_t iy = iyStart_; iy < iyEnd_; iy++) {
         for (uint32_t ix = ixStart_; ix < ixEnd_; ix++) {
@@ -217,8 +239,13 @@ void FrequencyCam::updateState(const uint16_t x, const uint16_t y, uint64_t t, b
   const auto dz_r = y_r * s.y_lag_r + y_i * s.y_lag_i;
   const auto dz_i = y_i * s.y_lag_r - y_r * s.y_lag_i;
   const auto omega = std::atan2(dz_i, dz_r);
-  // update frequency
-  s.omega = s.omega * omegaDecay_ + omega * omegaMix_;
+  // compute how much the difference in angle is w.r.t
+  // the predicted angle
+  const auto e_omega = omega - s.omega;
+  // could avoid conditional by another complex multiplication
+  const auto e_omega_wrapped = (e_omega < -M_PI) ? (e_omega + 2 * M_PI) : e_omega;
+  // update frequency: new omega measured is s.omega + e_omega_wrapped
+  s.omega = s.omega * omegaDecay_ + omegaMix_ * (s.omega + e_omega_wrapped);
   // update rate
   const double t_sec = 1e-9 * t;
   const double dt = t_sec - s.t;

@@ -46,7 +46,7 @@ private:
     variable_t y_lag_r{1.0};  // real (lagged & filtered signal)
     variable_t y_lag_i{0};    // imag (lagged & filtered signal)
     variable_t x[2]{0, 0};    // current and lagged signal x
-    variable_t omega{0};      // smoothed frequency
+    variable_t omega{1.51};   // smoothed frequency, initialize to about pi/2
     variable_t dt_avg{1e-6};  // average sample time (time between events)
   };
   class FilterSection
@@ -99,6 +99,7 @@ private:
   uint32_t iyStart_;
   uint32_t iyEnd_;
   State * state_{0};
+  double freq_[2]{-1.0, -1.0};  // frequency range
   uint32_t width_;
   uint32_t height_;
   uint64_t eventCount_{0};
@@ -116,9 +117,9 @@ private:
   FilterSection h0Filter1_{1.0 / 1.03613677};
   FilterSection h1Filter0_{0.2421264};
   FilterSection h1Filter1_{0.85908849};
-  static constexpr variable_t omegaMix_{1.0 / 128.0};
+  static constexpr variable_t omegaMix_{1.0 / 100.0};
   static constexpr variable_t omegaDecay_{1 - omegaMix_};
-  static constexpr variable_t dtMix_{1.0 / 128.0};
+  static constexpr variable_t dtMix_{1.0 / 100.0};
   static constexpr variable_t dtDecay_{1 - dtMix_};
 };
 }  // namespace event_fourier

@@ -28,8 +28,9 @@
 #include <rosbag2_cpp/readers/sequential_reader.hpp>
 
 //#define DEBUG
-#define DEBUG_FREQ
+//#define DEBUG_FREQ
 #define PRODUCTION
+#define TAKE_LOG
 
 namespace event_fourier
 {
@@ -74,16 +75,19 @@ bool FrequencyCam::initialize()
   auto qos = rclcpp::QoS(rclcpp::KeepLast(EVENT_QUEUE_DEPTH)).best_effort().durability_volatile();
   useSensorTime_ = this->declare_parameter<bool>("use_sensor_time", true);
   const std::string bag = this->declare_parameter<std::string>("bag_file", "");
-  const std::vector<long> def_roi = {0, 0, 100000, 100000};
-  const std::vector<long> roi = this->declare_parameter<std::vector<long>>("roi", def_roi);
-  roi_ = std::vector<uint32_t>(roi.begin(), roi.end());  // convert to uint32_t
   freq_[0] = this->declare_parameter<double>("min_frequency", 0.0);
   freq_[1] = this->declare_parameter<double>("max_frequency", 0.0);
   RCLCPP_INFO_STREAM(this->get_logger(), "minimum frequency: " << freq_[0]);
   if (freq_[1] > 0) {
     RCLCPP_INFO_STREAM(this->get_logger(), "maximum frequency: " << freq_[1]);
   }
-
+  dtMix_ = static_cast<float>(this->declare_parameter<double>("dt_averaging", 1e-2));
+  dtDecay_ = 1.0 - dtMix_;
+  omegaMix_ = static_cast<float>(this->declare_parameter<double>("omega_averaging", 1e-2));
+  omegaDecay_ = 1.0 - omegaMix_;
+  const std::vector<long> def_roi = {0, 0, 100000, 100000};
+  const std::vector<long> roi = this->declare_parameter<std::vector<long>>("roi", def_roi);
+  roi_ = std::vector<uint32_t>(roi.begin(), roi.end());  // convert to uint32_t
   if (
     roi_[0] != def_roi[0] || roi_[1] != def_roi[1] || roi_[2] != def_roi[2] ||
     roi_[3] != def_roi[3]) {
@@ -112,23 +116,39 @@ cv::Mat FrequencyCam::makeRawFrequencyImage() const
   cv::Mat rawImg(height_, width_, CV_32FC1, 0.0);
   constexpr double pi2_inv = 1.0 / (2.0 * M_PI);
   // copy data into raw image
+  size_t n_stale(0);
   for (uint32_t iy = iyStart_; iy < iyEnd_; iy++) {
     for (uint32_t ix = ixStart_; ix < ixEnd_; ix++) {
       const size_t offset = iy * width_ + ix;
       const State & state = state_[offset];
       // dt: time of no update for this pixel
 #ifdef PRODUCTION
+      const double freq_clamped = state.omega * (pi2_inv / std::max(state.dt_avg, 1.e-8f));
       const double dt = lastEventTime - state.t;
-      const bool isStale = dt > 1.0;  // if no events for certain time, no valid!
+      // if no events for certain time, no valid!
+      const bool isStale = dt * std::max(freq_clamped, freq_[0]) > 2;
+      //const double dt_avg_clamped = std::max(state.dt_avg, 1.0e-6f);
+      //const double relVar =
+      //(state.dt2_avg - state.dt_avg * state.dt_avg) / (dt_avg_clamped * dt_avg_clamped);
+
+      //const bool isValid = state.omega > 0 && relVar < 10.0 && !isStale;
       const bool isValid = state.omega > 0 && !isStale;
-      rawImg.at<float>(iy, ix) =
-        isValid ? state.omega * (pi2_inv / std::max(state.dt_avg, 1.e-8f)) : freq_[0];
+      if (isStale) {
+        n_stale++;
+      }
+#ifdef TAKE_LOG
+      rawImg.at<float>(iy, ix) = isValid ? std::log10(freq_clamped) : std::log10(freq_[0]);
+#else
+      rawImg.at<float>(iy, ix) = isValid ? freq_clamped : freq_[0];
+#endif
 #else
       (void)lastEventTime;
-      rawImg.at<float>(iy, ix) = state.omega * pi2_inv;
+      rawImg.at<float>(iy, ix) =
+        (state.dt2_avg - state.dt_avg * state.dt_avg) / std::max(state.dt_avg, 1.0e-6f);
 #endif
     }
   }
+  //std::cout << "num stale: " << n_stale << std::endl;
   return (rawImg);
 }
 
@@ -141,8 +161,21 @@ void FrequencyCam::publishImage()
     double minVal;
     if (freq_[0] >= 0 && freq_[1] > freq_[0]) {
       // fixed frequency-to-color mapping
+#ifdef PRODUCTION
+#ifdef TAKE_LOG
+      minVal = log10(freq_[0]);
+      range = log10(freq_[1]) - log10(freq_[0]);
+#else
       minVal = freq_[0];
       range = freq_[1] - freq_[0];
+#endif
+#else
+      // auto-scale frequency-to-color mapping
+      double maxVal;
+      cv::Point minLoc, maxLoc;
+      cv::minMaxLoc(rawImg, &minVal, &maxVal, &minLoc, &maxLoc);
+      range = maxVal - minVal;
+#endif
     } else {
       // auto-scale frequency-to-color mapping
       double maxVal;
@@ -250,6 +283,8 @@ void FrequencyCam::updateState(const uint16_t x, const uint16_t y, uint64_t t, b
   const double t_sec = 1e-9 * t;
   const double dt = t_sec - s.t;
   s.dt_avg = s.dt_avg * dtDecay_ + dtMix_ * dt;
+  const double dt2 = dt * dt;
+  s.dt2_avg = s.dt2_avg * dtDecay_ + dtMix_ * dt2;
   // advance lagged state of filter
   s.x[1] = s.x[0];
   s.x[0] = x_k;

@@ -48,6 +48,7 @@ private:
     variable_t x[2]{0, 0};    // current and lagged signal x
     variable_t omega{1.51};   // smoothed frequency, initialize to about pi/2
     variable_t dt_avg{1e-6};  // average sample time (time between events)
+    variable_t dt2_avg{1e-6};  // average of sample time squared
   };
   class FilterSection
   {
@@ -117,10 +118,10 @@ private:
   FilterSection h0Filter1_{1.0 / 1.03613677};
   FilterSection h1Filter0_{0.2421264};
   FilterSection h1Filter1_{0.85908849};
-  static constexpr variable_t omegaMix_{1.0 / 100.0};
-  static constexpr variable_t omegaDecay_{1 - omegaMix_};
-  static constexpr variable_t dtMix_{1.0 / 100.0};
-  static constexpr variable_t dtDecay_{1 - dtMix_};
+  variable_t omegaMix_{1.0 / 100.0};
+  variable_t omegaDecay_{1 - omegaMix_};
+  variable_t dtMix_{1.0 / 100.0};
+  variable_t dtDecay_{1 - dtMix_};
 };
 }  // namespace event_fourier
 #endif  // EVENT_FOURIER__FREQUENCY_CAM_H_

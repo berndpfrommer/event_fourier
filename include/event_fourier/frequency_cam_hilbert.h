@@ -13,8 +13,8 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-#ifndef EVENT_FOURIER__FREQUENCY_CAM_H_
-#define EVENT_FOURIER__FREQUENCY_CAM_H_
+#ifndef EVENT_FOURIER__FREQUENCY_CAM_HILBERT_H_
+#define EVENT_FOURIER__FREQUENCY_CAM_HILBERT_H_
 
 #include <stdlib.h>
 
@@ -27,25 +27,52 @@
 
 namespace event_fourier
 {
-class FrequencyCam : public rclcpp::Node
+class FrequencyCamHilbert : public rclcpp::Node
 {
 public:
-  explicit FrequencyCam(const rclcpp::NodeOptions & options);
-  ~FrequencyCam();
+  explicit FrequencyCamHilbert(const rclcpp::NodeOptions & options);
+  ~FrequencyCamHilbert();
 
-  FrequencyCam(const FrequencyCam &) = delete;
-  FrequencyCam & operator=(const FrequencyCam &) = delete;
+  FrequencyCamHilbert(const FrequencyCamHilbert &) = delete;
+  FrequencyCamHilbert & operator=(const FrequencyCamHilbert &) = delete;
 
 private:
   typedef float variable_t;
   struct State  // per-pixel filter state
   {
-    variable_t t_flip{0};     // time of last flip
-    bool upper_half{false};   // whether signal is in upper or lower half
-    variable_t t{0};          // last time stamp
+    variable_t y_lag_r{1.0};   // real (lagged & filtered signal)
+    variable_t y_lag_i{0};     // imag (lagged & filtered signal)
+    variable_t omega{1.51};    // smoothed frequency, initialize to about pi/2
+    variable_t dt2_avg{1e-6};  // average of sample time squared
+    variable_t t{0};           // last time stamp
     variable_t p{0};          // lagged polarity of events
     variable_t x[2]{0, 0};    // current and lagged signal x
-    variable_t dt_avg{-1.0};  // average sample time (time between events)
+    variable_t dt_avg{1e-6};  // average sample time (time between events)
+  };
+  class FilterSection
+  {
+  public:
+    explicit FilterSection(const variable_t ai) : ai_(ai)
+    {
+      x_[0] = x_[1] = 0;
+      y_[0] = y_[1] = 0;
+    };
+    inline variable_t apply(const variable_t x)
+    {
+      // y = ai * y_lag_2 - x_lag_2 + ai * x
+      const variable_t y = ai_ * (y_[1] + x) - x_[1];
+      // update lagged variables
+      x_[1] = x_[0];
+      x_[0] = x;
+      y_[1] = y_[0];
+      y_[0] = y;
+      return (y);
+    };
+
+  private:
+    variable_t ai_;
+    variable_t x_[2];
+    variable_t y_[2];
   };
   using EventArray = event_array_msgs::msg::EventArray;
   using EventArrayConstPtr = EventArray::ConstSharedPtr;
@@ -86,8 +113,14 @@ private:
   // ---------- coefficients for state update
   variable_t c_[2];
   variable_t c_p_{0};
+  FilterSection h0Filter0_{1.0 / 1.59040427};
+  FilterSection h0Filter1_{1.0 / 1.03613677};
+  FilterSection h1Filter0_{0.2421264};
+  FilterSection h1Filter1_{0.85908849};
+  variable_t omegaMix_{1.0 / 100.0};
+  variable_t omegaDecay_{1 - omegaMix_};
   variable_t dtMix_{1.0 / 100.0};
   variable_t dtDecay_{1 - dtMix_};
 };
 }  // namespace event_fourier
-#endif  // EVENT_FOURIER__FREQUENCY_CAM_H_
+#endif  // EVENT_FOURIER__FREQUENCY_CAM_HILBERT_H_

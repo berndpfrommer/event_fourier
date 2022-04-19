@@ -27,24 +27,20 @@
 #include <rosbag2_cpp/reader.hpp>
 #include <rosbag2_cpp/readers/sequential_reader.hpp>
 
-//#define DEBUG
-//#define DEBUG_FREQ
-#define PRODUCTION
-#define TAKE_LOG
+#define DEBUG
+
+#ifdef DEBUG
+const uint16_t x_debug = 377;
+const uint16_t y_debug = 435;
+
+std::ofstream debug("freq.txt");
+std::ofstream debug_flip("flip.txt");
+#endif
 
 namespace event_fourier
 {
-#ifdef DEBUG
-std::ofstream debug_file("debug_cam.txt");
-#endif
-#ifdef DEBUG_FREQ
-std::ofstream debug_freq("freq_cam.txt");
-#endif
 FrequencyCam::FrequencyCam(const rclcpp::NodeOptions & options) : Node("event_fourier", options)
 {
-  c_[0] = 1.95;
-  c_[1] = -0.9504;
-  c_p_ = 0.98;
   if (!initialize()) {
     RCLCPP_ERROR(this->get_logger(), "frequency cam  startup failed!");
     throw std::runtime_error("startup of FrequencyCam node failed!");
@@ -56,18 +52,6 @@ FrequencyCam::~FrequencyCam() { delete[] state_; }
 bool FrequencyCam::initialize()
 {
   rmw_qos_profile_t qosProf = rmw_qos_profile_default;
-#if 0  
-  qosProf.history = RMW_QOS_POLICY_HISTORY_KEEP_LAST;
-  qosProf.depth = imageQueueSize;  // keep at most this number of images
-  qosProf.reliability = RMW_QOS_POLICY_RELIABILITY_SYSTEM_DEFAULT;
-  qosProf.durability = RMW_QOS_POLICY_DURABILITY_VOLATILE;  // sender does not have to store
-  qosProf.deadline.sec = 5;                                 // max expect time between msgs pub
-  qosProf.deadline.nsec = 0;
-  qosProf.lifespan.sec = 1;  // how long until msg are considered expired
-  qosProf.lifespan.nsec = 0;
-  qosProf.liveliness_lease_duration.sec = 10;  // time to declare client dead
-  qosProf.liveliness_lease_duration.nsec = 0;
-#endif
   imagePub_ = image_transport::create_publisher(this, "~/frequency_image", qosProf);
   sliceTime_ =
     static_cast<uint64_t>((std::abs(this->declare_parameter<double>("slice_time", 0.025) * 1e9)));
@@ -76,15 +60,26 @@ bool FrequencyCam::initialize()
   useSensorTime_ = this->declare_parameter<bool>("use_sensor_time", true);
   const std::string bag = this->declare_parameter<std::string>("bag_file", "");
   freq_[0] = this->declare_parameter<double>("min_frequency", 0.0);
-  freq_[1] = this->declare_parameter<double>("max_frequency", 0.0);
+  freq_[0] = std::max(freq_[0], 0.1);
+  freq_[1] = this->declare_parameter<double>("max_frequency", -1.0);
   RCLCPP_INFO_STREAM(this->get_logger(), "minimum frequency: " << freq_[0]);
-  if (freq_[1] > 0) {
-    RCLCPP_INFO_STREAM(this->get_logger(), "maximum frequency: " << freq_[1]);
-  }
+  RCLCPP_INFO_STREAM(this->get_logger(), "maximum frequency: " << freq_[1]);
   dtMix_ = static_cast<float>(this->declare_parameter<double>("dt_averaging", 1e-2));
   dtDecay_ = 1.0 - dtMix_;
-  omegaMix_ = static_cast<float>(this->declare_parameter<double>("omega_averaging", 1e-2));
-  omegaDecay_ = 1.0 - omegaMix_;
+  const double alpha_detrend =
+    1.0 / std::max(1.0, this->declare_parameter<double>("events_detrend", 50));
+  const double beta_highpass =
+    1.0 /
+    std::max(1.0, this->declare_parameter<double>("events_highpass", 1 / alpha_detrend * 0.25));
+  RCLCPP_INFO_STREAM(this->get_logger(), "alpha detrend:  " << alpha_detrend);
+  RCLCPP_INFO_STREAM(this->get_logger(), "beta high pass: " << beta_highpass);
+  //c_[0] = 1.95;
+  c_[0] = 2 - (alpha_detrend + beta_highpass);
+  //c_[1] = -0.9504;
+  c_[1] = -(1 - alpha_detrend) * (1 - beta_highpass);
+  //c_p_ = 0.98;
+  c_p_ = 1 - 0.5 * beta_highpass;
+
   const std::vector<long> def_roi = {0, 0, 100000, 100000};
   const std::vector<long> roi = this->declare_parameter<std::vector<long>>("roi", def_roi);
   roi_ = std::vector<uint32_t>(roi.begin(), roi.end());  // convert to uint32_t
@@ -110,105 +105,12 @@ bool FrequencyCam::initialize()
   return (true);
 }
 
-cv::Mat FrequencyCam::makeRawFrequencyImage() const
-{
-  const double lastEventTime = 1e-9 * lastEventTime_;
-  cv::Mat rawImg(height_, width_, CV_32FC1, 0.0);
-  constexpr double pi2_inv = 1.0 / (2.0 * M_PI);
-  // copy data into raw image
-  size_t n_stale(0);
-  for (uint32_t iy = iyStart_; iy < iyEnd_; iy++) {
-    for (uint32_t ix = ixStart_; ix < ixEnd_; ix++) {
-      const size_t offset = iy * width_ + ix;
-      const State & state = state_[offset];
-      // dt: time of no update for this pixel
-#ifdef PRODUCTION
-      const double freq_clamped = state.omega * (pi2_inv / std::max(state.dt_avg, 1.e-8f));
-      const double dt = lastEventTime - state.t;
-      // if no events for certain time, no valid!
-      const bool isStale = dt * std::max(freq_clamped, freq_[0]) > 2;
-      //const double dt_avg_clamped = std::max(state.dt_avg, 1.0e-6f);
-      //const double relVar =
-      //(state.dt2_avg - state.dt_avg * state.dt_avg) / (dt_avg_clamped * dt_avg_clamped);
-
-      //const bool isValid = state.omega > 0 && relVar < 10.0 && !isStale;
-      const bool isValid = state.omega > 0 && !isStale;
-      if (isStale) {
-        n_stale++;
-      }
-#ifdef TAKE_LOG
-      rawImg.at<float>(iy, ix) = isValid ? std::log10(freq_clamped) : std::log10(freq_[0]);
-#else
-      rawImg.at<float>(iy, ix) = isValid ? freq_clamped : freq_[0];
-#endif
-#else
-      (void)lastEventTime;
-      rawImg.at<float>(iy, ix) =
-        (state.dt2_avg - state.dt_avg * state.dt_avg) / std::max(state.dt_avg, 1.0e-6f);
-#endif
-    }
-  }
-  //std::cout << "num stale: " << n_stale << std::endl;
-  return (rawImg);
-}
-
-void FrequencyCam::publishImage()
-{
-  if (imagePub_.getNumSubscribers() != 0 && height_ != 0) {
-    cv::Mat rawImg = makeRawFrequencyImage();
-    cv::Mat scaled;
-    double range;
-    double minVal;
-    if (freq_[0] >= 0 && freq_[1] > freq_[0]) {
-      // fixed frequency-to-color mapping
-#ifdef PRODUCTION
-#ifdef TAKE_LOG
-      minVal = log10(freq_[0]);
-      range = log10(freq_[1]) - log10(freq_[0]);
-#else
-      minVal = freq_[0];
-      range = freq_[1] - freq_[0];
-#endif
-#else
-      // auto-scale frequency-to-color mapping
-      double maxVal;
-      cv::Point minLoc, maxLoc;
-      cv::minMaxLoc(rawImg, &minVal, &maxVal, &minLoc, &maxLoc);
-      range = maxVal - minVal;
-#endif
-    } else {
-      // auto-scale frequency-to-color mapping
-      double maxVal;
-      cv::Point minLoc, maxLoc;
-      cv::minMaxLoc(rawImg, &minVal, &maxVal, &minLoc, &maxLoc);
-      std::cout << "min: " << minVal << " max: " << maxVal << std::endl;
-      if (freq_[0] > 0) {
-        minVal = freq_[0];
-      }
-      if (freq_[1] > 0) {
-        maxVal = freq_[0];
-      }
-      range = maxVal - minVal;
-    }
-    cv::convertScaleAbs(rawImg, scaled, 255.0 / range, -minVal * 255.0 / range);
-    //const float alpha = 255.0 / (2 * M_PI * (freq_[1] - freq_[0]));
-    //cv::convertScaleAbs(rawImg, scaled, alpha, -freq_[0] * 2 * M_PI * alpha);
-    cv::Mat colorImg;
-    cv::applyColorMap(scaled, colorImg, cv::COLORMAP_JET);
-    header_.stamp = lastTime_;
-    imagePub_.publish(cv_bridge::CvImage(header_, "bgr8", colorImg).toImageMsg());
-  }
-}
-
 void FrequencyCam::readEventsFromBag(const std::string & bagName)
 {
   rclcpp::Time t0;
   rosbag2_cpp::Reader reader;
   reader.open(bagName);
   rclcpp::Serialization<event_array_msgs::msg::EventArray> serialization;
-#ifdef DEBUG_FREQ
-  size_t lastCount = 0;
-#endif
   while (reader.has_next()) {
     auto bagmsg = reader.read_next();
     // if (bagmsg->topic_name == topic)
@@ -216,24 +118,6 @@ void FrequencyCam::readEventsFromBag(const std::string & bagName)
     EventArray::SharedPtr msg(new EventArray());
     serialization.deserialize_message(&serializedMsg, &(*msg));
     callbackEvents(msg);
-#ifdef DEBUG
-    if (eventCount_ > 10000) {
-      break;
-    }
-#endif
-#ifdef DEBUG_FREQ
-    if (eventCount_ > lastCount + 10000) {
-      cv::Mat rawImg = makeRawFrequencyImage();
-      for (uint32_t iy = iyStart_; iy < iyEnd_; iy++) {
-        for (uint32_t ix = ixStart_; ix < ixEnd_; ix++) {
-          debug_freq << " " << rawImg.at<float>(iy, ix);
-        }
-      }
-      debug_freq << std::endl;
-      debug_freq.flush();
-      lastCount = eventCount_;
-    }
-#endif
   }
 }
 
@@ -245,6 +129,7 @@ void FrequencyCam::initializeState(uint32_t width, uint32_t height, uint64_t t)
   state_ = new State[width * height];
   for (size_t i = 0; i < width * height; i++) {
     state_[i].t = t_sec;
+    state_[i].t_flip = t_sec;
   }
   ixStart_ = std::max(0u, roi_[0]);
   iyStart_ = std::max(0u, roi_[1]);
@@ -263,39 +148,120 @@ void FrequencyCam::updateState(const uint16_t x, const uint16_t y, uint64_t t, b
   const auto dp = p - s.p;  // raw change in polarity
   const auto x_k = c_[0] * s.x[0] + c_[1] * s.x[1] + c_p_ * dp;
   // compute imaginary arm of quadrature filter
-  const auto y_i_0 = h0Filter0_.apply(x_k);  // first section
-  const auto y_i = h0Filter1_.apply(y_i_0);  // second section
-  // compute real arm of quadrature filter
-  const auto y_r_0 = h1Filter0_.apply(x_k);  // first section
-  const auto y_r = h1Filter1_.apply(y_r_0);  // second section
-  // compute z * conjugate(z[-1]) and phase difference via atan
-  const auto dz_r = y_r * s.y_lag_r + y_i * s.y_lag_i;
-  const auto dz_i = y_i * s.y_lag_r - y_r * s.y_lag_i;
-  const auto omega = std::atan2(dz_i, dz_r);
-  // compute how much the difference in angle is w.r.t
-  // the predicted angle
-  const auto e_omega = omega - s.omega;
-  // could avoid conditional by another complex multiplication
-  const auto e_omega_wrapped = (e_omega < -M_PI) ? (e_omega + 2 * M_PI) : e_omega;
-  // update frequency: new omega measured is s.omega + e_omega_wrapped
-  s.omega = s.omega * omegaDecay_ + omegaMix_ * (s.omega + e_omega_wrapped);
-  // update rate
   const double t_sec = 1e-9 * t;
-  const double dt = t_sec - s.t;
-  s.dt_avg = s.dt_avg * dtDecay_ + dtMix_ * dt;
-  const double dt2 = dt * dt;
-  s.dt2_avg = s.dt2_avg * dtDecay_ + dtMix_ * dt2;
-  // advance lagged state of filter
+#ifdef DEBUG_FULL
+  if (x == x_debug && y == y_debug) {
+    std::cout << (polarity ? "ON" : "OFF") << " event " << t_sec << " avg: " << s.dt_avg
+              << std::endl;
+  }
+#endif
+  if ((s.upper_half && x_k < 0) || (!s.upper_half && x_k >= 0)) {
+    s.upper_half = !s.upper_half;
+    const double dt = t_sec - s.t_flip;
+    if (s.dt_avg <= 0) {
+      if (s.dt_avg == 0) {
+        s.dt_avg = std::min(dt, 0.1);
+        if (x == x_debug && y == y_debug) {
+          std::cout << "  init avg: " << s.dt_avg << std::endl;
+        }
+      } else {
+        s.dt_avg = 0;
+        // std::cout << "  setting dt_avg to zero at " << t_sec << std::endl;
+      }
+      s.t_flip = t_sec;
+    } else {
+      if (dt > 5 * s.dt_avg) {
+        s.dt_avg = 0;  // restart
+      } else {
+        s.dt_avg = s.dt_avg * dtDecay_ + dtMix_ * dt;
+      }
+    }
+#ifdef DEBUG_FULL
+    if (x == x_debug && y == y_debug) {
+      const double f = 0.5 / std::max(s.dt_avg, 1e-6f);
+      std::cout << x_k << " " << (int)s.upper_half << "  dt = " << dt << " avg: " << s.dt_avg
+                << " freq: " << f << std::endl;
+    }
+#endif
+#ifdef DEBUG
+    if (x == x_debug && y == y_debug) {
+      debug_flip << std::setprecision(10) << t_sec << " " << dt << " " << s.dt_avg << std::endl;
+    }
+#endif
+    s.t_flip = t_sec;
+  }
+  s.t = t_sec;
+  s.p = p;
   s.x[1] = s.x[0];
   s.x[0] = x_k;
-  s.p = p;
-  s.y_lag_r = y_r;
-  s.y_lag_i = y_i;
-  s.t = t_sec;
 #ifdef DEBUG
-  debug_file << t << " " << x_k << " " << y_r << " " << y_i << " " << omega << " " << s.omega
-             << std::endl;
+  if (x == x_debug && y == y_debug) {
+    const double dt = t_sec - s.t_flip;
+    const double f = 0.5 / std::max(s.dt_avg, 1e-6f);
+    debug << t_sec << " " << x_k << " " << (int)s.upper_half << " " << dt << " " << s.dt_avg << " "
+          << f << std::endl;
+  }
 #endif
+}
+
+cv::Mat FrequencyCam::makeRawFrequencyImage() const
+{
+  const double lastEventTime = 1e-9 * lastEventTime_;
+  cv::Mat rawImg(height_, width_, CV_32FC1, 0.0);
+  // copy data into raw image
+  const double maxDt = 0.5 / freq_[0] * 2.0;
+  const double logMinFreq = std::log10(freq_[0]);
+  for (uint32_t iy = iyStart_; iy < iyEnd_; iy++) {
+    for (uint32_t ix = ixStart_; ix < ixEnd_; ix++) {
+      const size_t offset = iy * width_ + ix;
+      const State & state = state_[offset];
+      const double dt = lastEventTime - state.t;
+      const double f = 0.5 / std::max(state.dt_avg, 1e-6f);
+      if (dt < maxDt && dt * f < 2) {
+        rawImg.at<float>(iy, ix) = std::max(std::log10(f), logMinFreq);
+      } else {
+        rawImg.at<float>(iy, ix) = logMinFreq;
+      }
+#if 0      
+      if (ix == x_debug && iy == y_debug) {
+        std::cout << "raw image: f: " << f << " img: " << rawImg.at<float>(iy, ix)
+                  << " lmf: " << logMinFreq << std::endl;
+      }
+#endif
+    }
+  }
+  return (rawImg);
+}
+
+void FrequencyCam::publishImage()
+{
+  if (imagePub_.getNumSubscribers() != 0 && height_ != 0) {
+    cv::Mat rawImg = makeRawFrequencyImage();
+    cv::Mat scaled;
+    double range;
+    double minVal;
+    double maxVal;
+    if (freq_[1] < 0) {
+      cv::Point minLoc, maxLoc;
+      cv::minMaxLoc(rawImg, &minVal, &maxVal, &minLoc, &maxLoc);
+    } else {
+      maxVal = std::log10(freq_[1]);  // override upper bound
+    }
+    minVal = std::log10(freq_[0]);  // override lower bound no matter what
+
+    range = maxVal - minVal;
+    cv::convertScaleAbs(rawImg, scaled, 255.0 / range, -minVal * 255.0 / range);
+#if 0    
+    std::cout << "minval: " << minVal << " maxval: " << maxVal << std::endl;
+    std::cout << "published: " << rawImg.at<float>(y_debug, x_debug)
+              << " scaled: " << (int)scaled.at<uint8_t>(y_debug, x_debug) << std::endl;
+#endif
+    cv::Mat colorImg;
+
+    cv::applyColorMap(scaled, colorImg, cv::COLORMAP_JET);
+    header_.stamp = lastTime_;
+    imagePub_.publish(cv_bridge::CvImage(header_, "bgr8", colorImg).toImageMsg());
+  }
 }
 
 void FrequencyCam::callbackEvents(EventArrayConstPtr msg)
@@ -325,13 +291,7 @@ void FrequencyCam::callbackEvents(EventArrayConstPtr msg)
     uint16_t x, y;
     const bool polarity = event_array_msgs::mono::decode_t_x_y_p(p, time_base, &t, &x, &y);
     lastEventTime = t;
-#ifdef DEBUG
-    if (x == 319 && y == 239) {
-      updateState(x, y, t, polarity);
-    }
-#else
     updateState(x, y, t, polarity);
-#endif
   }
   lastEventTime_ = lastEventTime;
   eventCount_ += msg->events.size() >> 3;

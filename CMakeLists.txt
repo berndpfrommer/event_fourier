@@ -66,6 +66,19 @@ ament_auto_add_executable(frequency_cam_node
   src/frequency_cam_node.cpp
   )
 
+#
+# ---- hilbert version of frequency_cam shared library/component
+#
+ament_auto_add_library(frequency_cam_hilbert SHARED
+  src/frequency_cam_hilbert.cpp
+  )
+
+rclcpp_components_register_nodes(frequency_cam_hilbert "event_fourier::FrequencyCamHilbert")
+
+ament_auto_add_executable(frequency_cam_hilbert_node
+  src/frequency_cam_hilbert_node.cpp
+  )
+
 
 # -------- installation
 

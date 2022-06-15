@@ -27,12 +27,9 @@
 #include <rosbag2_cpp/reader.hpp>
 #include <rosbag2_cpp/readers/sequential_reader.hpp>
 
-#define DEBUG
+//#define DEBUG
 
 #ifdef DEBUG
-const uint16_t x_debug = 377;
-const uint16_t y_debug = 435;
-
 std::ofstream debug("freq.txt");
 std::ofstream debug_flip("flip.txt");
 #endif
@@ -79,6 +76,11 @@ bool FrequencyCam::initialize()
   c_[1] = -(1 - alpha_detrend) * (1 - beta_highpass);
   //c_p_ = 0.98;
   c_p_ = 1 - 0.5 * beta_highpass;
+  resetThreshold_ = this->declare_parameter<double>("reset_threshold", 5.0);
+#ifdef DEBUG
+  debugX_ = static_cast<uint16_t>(this->declare_parameter<int>("debug_x", 320));
+  debugY_ = static_cast<uint16_t>(this->declare_parameter<int>("debug_y", 240));
+#endif
 
   const std::vector<long> def_roi = {0, 0, 100000, 100000};
   const std::vector<long> roi = this->declare_parameter<std::vector<long>>("roi", def_roi);
@@ -150,41 +152,42 @@ void FrequencyCam::updateState(const uint16_t x, const uint16_t y, uint64_t t, b
   // compute imaginary arm of quadrature filter
   const double t_sec = 1e-9 * t;
 #ifdef DEBUG_FULL
-  if (x == x_debug && y == y_debug) {
+  if (x == debugX_ && y == debugY_) {
     std::cout << (polarity ? "ON" : "OFF") << " event " << t_sec << " avg: " << s.dt_avg
               << std::endl;
   }
 #endif
-  if ((s.upper_half && x_k < 0) || (!s.upper_half && x_k >= 0)) {
-    s.upper_half = !s.upper_half;
+  if (x_k < 0 && s.x[0] >= 0) {
     const double dt = t_sec - s.t_flip;
-    if (s.dt_avg <= 0) {
+    if (s.dt_avg <= 0) {  // initialization phase
       if (s.dt_avg == 0) {
         s.dt_avg = std::min(dt, 0.1);
-        if (x == x_debug && y == y_debug) {
+#ifdef DEBUG
+        if (x == debugX_ && y == debugY_) {
           std::cout << "  init avg: " << s.dt_avg << std::endl;
         }
+#endif
       } else {
-        s.dt_avg = 0;
+        s.dt_avg = 0;  // signal that on next step dt can be computed
         // std::cout << "  setting dt_avg to zero at " << t_sec << std::endl;
       }
       s.t_flip = t_sec;
-    } else {
-      if (dt > 5 * s.dt_avg) {
+    } else {  // not in intialization phase
+      if (dt > resetThreshold_ * s.dt_avg) {
         s.dt_avg = 0;  // restart
-      } else {
+      } else {         // regular case: update
         s.dt_avg = s.dt_avg * dtDecay_ + dtMix_ * dt;
       }
     }
 #ifdef DEBUG_FULL
-    if (x == x_debug && y == y_debug) {
-      const double f = 0.5 / std::max(s.dt_avg, 1e-6f);
+    if (x == debugX_ && y == debugY_) {
+      const double f = 1.0 / std::max(s.dt_avg, 1e-6f);
       std::cout << x_k << " " << (int)s.upper_half << "  dt = " << dt << " avg: " << s.dt_avg
                 << " freq: " << f << std::endl;
     }
 #endif
 #ifdef DEBUG
-    if (x == x_debug && y == y_debug) {
+    if (x == debugX_ && y == debugY_) {
       debug_flip << std::setprecision(10) << t_sec << " " << dt << " " << s.dt_avg << std::endl;
     }
 #endif
@@ -195,9 +198,9 @@ void FrequencyCam::updateState(const uint16_t x, const uint16_t y, uint64_t t, b
   s.x[1] = s.x[0];
   s.x[0] = x_k;
 #ifdef DEBUG
-  if (x == x_debug && y == y_debug) {
+  if (x == debugX_ && y == debugY_) {
     const double dt = t_sec - s.t_flip;
-    const double f = 0.5 / std::max(s.dt_avg, 1e-6f);
+    const double f = s.dt_avg < 1e-6f ? 0 : (1.0 / s.dt_avg);
     debug << t_sec << " " << x_k << " " << (int)s.upper_half << " " << dt << " " << s.dt_avg << " "
           << f << std::endl;
   }
@@ -209,21 +212,21 @@ cv::Mat FrequencyCam::makeRawFrequencyImage() const
   const double lastEventTime = 1e-9 * lastEventTime_;
   cv::Mat rawImg(height_, width_, CV_32FC1, 0.0);
   // copy data into raw image
-  const double maxDt = 0.5 / freq_[0] * 2.0;
+  const double maxDt = 1.0 / freq_[0] * 2.0;
   const double logMinFreq = std::log10(freq_[0]);
   for (uint32_t iy = iyStart_; iy < iyEnd_; iy++) {
     for (uint32_t ix = ixStart_; ix < ixEnd_; ix++) {
       const size_t offset = iy * width_ + ix;
       const State & state = state_[offset];
       const double dt = lastEventTime - state.t;
-      const double f = 0.5 / std::max(state.dt_avg, 1e-6f);
+      const double f = 1.0 / std::max(state.dt_avg, 1e-6f);
       if (dt < maxDt && dt * f < 2) {
         rawImg.at<float>(iy, ix) = std::max(std::log10(f), logMinFreq);
       } else {
         rawImg.at<float>(iy, ix) = logMinFreq;
       }
 #if 0      
-      if (ix == x_debug && iy == y_debug) {
+      if (ix == debugX_ && iy == debugY_) {
         std::cout << "raw image: f: " << f << " img: " << rawImg.at<float>(iy, ix)
                   << " lmf: " << logMinFreq << std::endl;
       }
@@ -253,8 +256,8 @@ void FrequencyCam::publishImage()
     cv::convertScaleAbs(rawImg, scaled, 255.0 / range, -minVal * 255.0 / range);
 #if 0    
     std::cout << "minval: " << minVal << " maxval: " << maxVal << std::endl;
-    std::cout << "published: " << rawImg.at<float>(y_debug, x_debug)
-              << " scaled: " << (int)scaled.at<uint8_t>(y_debug, x_debug) << std::endl;
+    std::cout << "published: " << rawImg.at<float>(debugY_, debugX_)
+              << " scaled: " << (int)scaled.at<uint8_t>(debugY_, debugX_) << std::endl;
 #endif
     cv::Mat colorImg;
 
@@ -308,8 +311,8 @@ void FrequencyCam::statistics()
   if (eventCount_ > 0 && totTime_ > 0) {
     const double usec = static_cast<double>(totTime_);
     RCLCPP_INFO(
-      this->get_logger(), "%6.2f Mev/s, %8.2f msgs/s, %8.2f usec/ev  %6.0f usec/msg, drop: %3ld",
-      double(eventCount_) / usec, msgCount_ * 1.0e6 / usec, usec / (double)eventCount_,
+      this->get_logger(), "%6.2f Mev/s, %8.2f msgs/s, %8.2f nsec/ev  %6.0f usec/msg, drop: %3ld",
+      double(eventCount_) / usec, msgCount_ * 1.0e6 / usec, 1e3 * usec / (double)eventCount_,
       usec / msgCount_, droppedSeq_);
     eventCount_ = 0;
     totTime_ = 0;

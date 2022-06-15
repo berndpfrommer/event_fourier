@@ -88,6 +88,10 @@ private:
   variable_t c_p_{0};
   variable_t dtMix_{1.0 / 100.0};
   variable_t dtDecay_{1 - dtMix_};
+  variable_t resetThreshold_{5};
+  // ------------------ debugging stuff
+  uint16_t debugX_{0};
+  uint16_t debugY_{0};
 };
 }  // namespace event_fourier
 #endif  // EVENT_FOURIER__FREQUENCY_CAM_H_

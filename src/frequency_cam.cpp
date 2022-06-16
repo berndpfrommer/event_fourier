@@ -168,7 +168,9 @@ void FrequencyCam::updateState(State * state, const Event & e)
               << std::endl;
   }
 #endif
-  if (x_k < 0 && s.x[0] >= 0) {
+  if (x_k > 0 && s.x[0] <= 0) {
+    // measure period upon transition from lower to upper half, i.e.
+    // when ON events happen. This is more precise than on the other flank
     const double dt = t_sec - s.t_flip;
     if (s.dt_avg <= 0) {  // initialization phase
       if (s.dt_avg == 0) {
@@ -185,8 +187,8 @@ void FrequencyCam::updateState(State * state, const Event & e)
       s.t_flip = t_sec;
     } else {  // not in intialization phase
       if (dt > resetThreshold_ * s.dt_avg) {
-        std::cout << t_sec << " restart avg dt: " << dt << " vs " << s.dt_avg
-                  << " thresh: " << resetThreshold_ << std::endl;
+        //std::cout << t_sec << " restart avg dt: " << dt << " vs " << s.dt_avg
+        //<< " thresh: " << resetThreshold_ << std::endl;
         s.dt_avg = 0;  // restart
       } else {         // regular case: update
         s.dt_avg = s.dt_avg * dtDecay_ + dtMix_ * dt;
@@ -224,7 +226,6 @@ cv::Mat FrequencyCam::makeRawFrequencyImage() const
 {
   const double lastEventTime = 1e-9 * lastEventTime_;
   cv::Mat rawImg(height_, width_, CV_32FC1, 0.0);
-  // copy data into raw image
   const double maxDt = 1.0 / freq_[0] * 2.0;
   const double logMinFreq = std::log10(freq_[0]);
   for (uint32_t iy = iyStart_; iy < iyEnd_; iy++) {
@@ -233,6 +234,10 @@ cv::Mat FrequencyCam::makeRawFrequencyImage() const
       const State & state = state_[offset];
       const double dt = lastEventTime - state.t;
       const double f = 1.0 / std::max(state.dt_avg, 1e-6f);
+      // filter out any pixels that have not been updated
+      // for more than two periods of the minimum allowed
+      // frequency or two periods of the actual estimated
+      // period
       if (dt < maxDt && dt * f < 2) {
         rawImg.at<float>(iy, ix) = std::max(std::log10(f), logMinFreq);
       } else {
@@ -258,6 +263,7 @@ void FrequencyCam::publishImage()
     double minVal;
     double maxVal;
     if (freq_[1] < 0) {
+      // no max frequency specified, calculate highest frequency
       cv::Point minLoc, maxLoc;
       cv::minMaxLoc(rawImg, &minVal, &maxVal, &minLoc, &maxLoc);
     } else {

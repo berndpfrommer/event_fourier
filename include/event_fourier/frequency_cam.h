@@ -21,6 +21,7 @@
 #include <cstdlib>
 #include <event_array_msgs/msg/event_array.hpp>
 #include <image_transport/image_transport.hpp>
+#include <iostream>
 #include <opencv2/core/core.hpp>
 #include <rclcpp/rclcpp.hpp>
 #include <vector>
@@ -38,6 +39,14 @@ public:
 
 private:
   typedef float variable_t;
+  struct Event  // event representation, needed for filtering
+  {
+    uint64_t t;
+    uint16_t x;
+    uint16_t y;
+    bool polarity;
+  };
+  friend std::ostream & operator<<(std::ostream & os, const Event & e);
   struct State  // per-pixel filter state
   {
     variable_t t_flip{0};     // time of last flip
@@ -46,6 +55,9 @@ private:
     variable_t p{0};          // lagged polarity of events
     variable_t x[2]{0, 0};    // current and lagged signal x
     variable_t dt_avg{-1.0};  // average sample time (time between events)
+    uint8_t skip{4};          // counter for noise filter
+    Event e[4];               // buffer of events for noise filter
+    uint8_t idx{0};           // index pointer into noise event buffer
   };
   using EventArray = event_array_msgs::msg::EventArray;
   using EventArrayConstPtr = EventArray::ConstSharedPtr;
@@ -55,8 +67,9 @@ private:
   void callbackEvents(EventArrayConstPtr msg);
   void publishImage();
   void statistics();
-  void updateState(const uint16_t x, const uint16_t y, uint64_t t, bool polarity);
+  void updateState(State * state, const Event & e);
   cv::Mat makeRawFrequencyImage() const;
+  bool filterNoise(State * state, const Event & newEvent, Event * e_f);
   // ------ variables ----
   rclcpp::Time lastTime_{0};
   uint64_t sliceTime_{0};
@@ -89,9 +102,13 @@ private:
   variable_t dtMix_{1.0 / 100.0};
   variable_t dtDecay_{1 - dtMix_};
   variable_t resetThreshold_{5};
+  // ---------- dark noise filtering
+  uint64_t noiseFilterDtPass_{0};
+  uint64_t noiseFilterDtDead_{0};
   // ------------------ debugging stuff
   uint16_t debugX_{0};
   uint16_t debugY_{0};
 };
+std::ostream & operator<<(std::ostream & os, const FrequencyCam::Event & e);
 }  // namespace event_fourier
 #endif  // EVENT_FOURIER__FREQUENCY_CAM_H_

@@ -68,8 +68,51 @@ private:
   void publishImage();
   void statistics();
   void updateState(State * state, const Event & e);
-  cv::Mat makeRawFrequencyImage() const;
+  struct NoTF
+  {
+    static double tf(double f) { return (f); }
+  };
+  struct LogTF
+  {
+    static double tf(double f) { return (std::log10(f)); }
+  };
+  template <class T>
+  cv::Mat makeTransformedFrequencyImage() const
+  {
+    const double lastEventTime = 1e-9 * lastEventTime_;
+    cv::Mat rawImg(height_, width_, CV_32FC1, 0.0);
+    const double maxDt = 1.0 / freq_[0] * 2.0;
+    const double minFreq = T::tf(freq_[0]);
+    for (uint32_t iy = iyStart_; iy < iyEnd_; iy++) {
+      for (uint32_t ix = ixStart_; ix < ixEnd_; ix++) {
+        const size_t offset = iy * width_ + ix;
+        const State & state = state_[offset];
+        const double dt = lastEventTime - state.t;
+        const double f = 1.0 / std::max(state.dt_avg, 1e-6f);
+        // filter out any pixels that have not been updated
+        // for more than two periods of the minimum allowed
+        // frequency or two periods of the actual estimated
+        // period
+        if (dt < maxDt && dt * f < 2) {
+          rawImg.at<float>(iy, ix) = std::max(T::tf(f), minFreq);
+        } else {
+          rawImg.at<float>(iy, ix) = minFreq;
+        }
+      }
+    }
+    return (rawImg);
+  }
+
+  cv::Mat makeRawFrequencyImage()
+  {
+    if (useLogFrequency_) {
+      return (makeTransformedFrequencyImage<LogTF>());
+    }
+    return (makeTransformedFrequencyImage<NoTF>());
+  }
+
   bool filterNoise(State * state, const Event & newEvent, Event * e_f);
+
   // ------ variables ----
   rclcpp::Time lastTime_{0};
   uint64_t sliceTime_{0};
@@ -85,7 +128,10 @@ private:
   uint32_t iyStart_;
   uint32_t iyEnd_;
   State * state_{0};
-  double freq_[2]{-1.0, -1.0};  // frequency range
+  double freq_[2]{-1.0, -1.0};   // frequency range
+  double tfFreq_[2]{0, 1.0};     // transformed frequency range
+  bool useLogFrequency_{false};  // visualize log10(frequency)
+  int numClusters_{0};           // number of freq clusters for image
   uint32_t width_;
   uint32_t height_;
   uint64_t eventCount_{0};

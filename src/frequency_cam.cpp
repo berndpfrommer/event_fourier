@@ -18,8 +18,11 @@
 #include <cv_bridge/cv_bridge.h>
 #include <event_array_msgs/decode.h>
 
+#include <algorithm>  // std::sort, std::stable_sort
 #include <fstream>
+#include <sstream>
 #include <image_transport/image_transport.hpp>
+#include <numeric>  // std::iota
 #include <opencv2/imgproc.hpp>
 #include <rclcpp/serialization.hpp>
 #include <rclcpp/serialized_message.hpp>
@@ -28,6 +31,7 @@
 #include <rosbag2_cpp/readers/sequential_reader.hpp>
 
 //#define DEBUG
+//#define PRINT_IMAGE_HISTOGRAM
 
 #ifdef DEBUG
 std::ofstream debug("freq.txt");
@@ -40,7 +44,7 @@ namespace event_fourier
 FrequencyCam::FrequencyCam(const rclcpp::NodeOptions & options) : Node("event_fourier", options)
 {
   if (!initialize()) {
-    RCLCPP_ERROR(this->get_logger(), "frequency cam  startup failed!");
+    RCLCPP_ERROR(get_logger(), "frequency cam  startup failed!");
     throw std::runtime_error("startup of FrequencyCam node failed!");
   }
 }
@@ -73,8 +77,17 @@ bool FrequencyCam::initialize()
   freq_[0] = this->declare_parameter<double>("min_frequency", 0.0);
   freq_[0] = std::max(freq_[0], 0.1);
   freq_[1] = this->declare_parameter<double>("max_frequency", -1.0);
-  RCLCPP_INFO_STREAM(this->get_logger(), "minimum frequency: " << freq_[0]);
-  RCLCPP_INFO_STREAM(this->get_logger(), "maximum frequency: " << freq_[1]);
+  RCLCPP_INFO_STREAM(get_logger(), "minimum frequency: " << freq_[0]);
+  RCLCPP_INFO_STREAM(get_logger(), "maximum frequency: " << freq_[1]);
+  useLogFrequency_ = this->declare_parameter<bool>("use_log_frequency", false);
+  tfFreq_[0] = useLogFrequency_ ? LogTF::tf(std::max(freq_[0], 1e-8)) : freq_[0];
+  tfFreq_[1] = useLogFrequency_ ? LogTF::tf(std::max(freq_[1], 1e-7)) : freq_[1];
+  numClusters_ = this->declare_parameter<int>("num_frequency_clusters", 0);
+  if (numClusters_ > 0) {
+    RCLCPP_INFO_STREAM(get_logger(), "number of frequency clusters: " << numClusters_);
+  } else {
+    RCLCPP_INFO_STREAM(get_logger(), "NOT clustering by frequency!");
+  }
   dtMix_ = static_cast<float>(this->declare_parameter<double>("dt_averaging_alpha", 0.1));
   dtDecay_ = 1.0 - dtMix_;
   const double T_prefilter =
@@ -101,7 +114,7 @@ bool FrequencyCam::initialize()
     roi_[0] != def_roi[0] || roi_[1] != def_roi[1] || roi_[2] != def_roi[2] ||
     roi_[3] != def_roi[3]) {
     RCLCPP_INFO_STREAM(
-      this->get_logger(),
+      get_logger(),
       "using roi: (" << roi_[0] << ", " << roi_[1] << ") w: " << roi_[2] << " h: " << roi_[3]);
   }
   if (bag.empty()) {
@@ -133,7 +146,7 @@ void FrequencyCam::readEventsFromBag(const std::string & bagName)
     serialization.deserialize_message(&serializedMsg, &(*msg));
     callbackEvents(msg);
   }
-  RCLCPP_INFO(this->get_logger(), "finished playing bag");
+  RCLCPP_INFO(get_logger(), "finished playing bag");
 }
 
 void FrequencyCam::initializeState(uint32_t width, uint32_t height, uint64_t t)
@@ -222,62 +235,132 @@ void FrequencyCam::updateState(State * state, const Event & e)
 #endif
 }
 
-cv::Mat FrequencyCam::makeRawFrequencyImage() const
+static void compute_max(const cv::Mat & img, double * maxVal)
 {
-  const double lastEventTime = 1e-9 * lastEventTime_;
-  cv::Mat rawImg(height_, width_, CV_32FC1, 0.0);
-  const double maxDt = 1.0 / freq_[0] * 2.0;
-  const double logMinFreq = std::log10(freq_[0]);
-  for (uint32_t iy = iyStart_; iy < iyEnd_; iy++) {
-    for (uint32_t ix = ixStart_; ix < ixEnd_; ix++) {
-      const size_t offset = iy * width_ + ix;
-      const State & state = state_[offset];
-      const double dt = lastEventTime - state.t;
-      const double f = 1.0 / std::max(state.dt_avg, 1e-6f);
-      // filter out any pixels that have not been updated
-      // for more than two periods of the minimum allowed
-      // frequency or two periods of the actual estimated
-      // period
-      if (dt < maxDt && dt * f < 2) {
-        rawImg.at<float>(iy, ix) = std::max(std::log10(f), logMinFreq);
-      } else {
-        rawImg.at<float>(iy, ix) = logMinFreq;
+  {
+    // no max frequency specified, calculate highest frequency
+    cv::Point minLoc, maxLoc;
+    double minVal;
+    cv::minMaxLoc(img, &minVal, maxVal, &minLoc, &maxLoc);
+  }
+}
+
+static void get_valid_pixels(
+  const cv::Mat & img, float minVal, float maxVal, std::vector<float> * values,
+  std::vector<cv::Point> * locations)
+{
+  for (int y = 0; y < img.rows; y++) {
+    for (int x = 0; x < img.cols; x++) {
+      const double v = img.at<float>(y, x);
+      if (v > minVal && v <= maxVal) {
+        values->push_back(v);
+        locations->push_back(cv::Point(x, y));
       }
-#if 0      
-      if (ix == debugX_ && iy == debugY_) {
-        std::cout << "raw image: f: " << f << " img: " << rawImg.at<float>(iy, ix)
-                  << " lmf: " << logMinFreq << std::endl;
-      }
-#endif
     }
   }
-  return (rawImg);
 }
+
+// sorting with indexfrom stackoverflow:
+// https://stackoverflow.com/questions/1577475/c-sorting-and-keeping-track-of-indexes
+template <typename T>
+std::vector<size_t> sort_indexes(
+  const std::vector<T> & v, std::vector<size_t> * inverse_idx, std::vector<T> * sorted_v)
+{
+  // initialize original index locations
+  std::vector<size_t> idx(v.size());
+  std::iota(idx.begin(), idx.end(), 0);
+
+  // sort indexes based on comparing values in v
+  // using std::stable_sort instead of std::sort
+  // to avoid unnecessary index re-orderings
+  // when v contains elements of equal values
+  std::stable_sort(idx.begin(), idx.end(), [&v](size_t i1, size_t i2) { return v[i1] < v[i2]; });
+  for (size_t i = 0; i < idx.size(); i++) {
+    (*inverse_idx)[idx[i]] = i;
+    sorted_v->push_back(v[idx[i]]);
+  }
+  return (idx);
+}
+
+static cv::Mat label_image(
+  const cv::Mat & freqImg, float minVal, float maxVal, int K, std::vector<float> * centers)
+{
+  std::vector<float> validPixels;
+  std::vector<cv::Point> locations;
+  get_valid_pixels(freqImg, minVal, maxVal, &validPixels, &locations);
+
+  if ((int)validPixels.size() <= K) {
+    // not enough valid pixels to cluster
+    return (cv::Mat::zeros(freqImg.size(), CV_32FC1));
+  }
+  const int attempts = 3;
+  std::vector<int> labels;
+  cv::TermCriteria criteria(cv::TermCriteria::EPS + cv::TermCriteria::COUNT, 10, 1.0);
+  std::vector<float> unsorted_centers;
+  (void)kmeans(validPixels, K, labels, criteria, attempts, cv::KMEANS_PP_CENTERS, unsorted_centers);
+  std::vector<size_t> reverse_idx(unsorted_centers.size());
+  std::vector<size_t> idx = sort_indexes(unsorted_centers, &reverse_idx, centers);
+  cv::Mat labeled = cv::Mat::zeros(freqImg.size(), CV_32FC1);
+  for (size_t i = 0; i < validPixels.size(); i++) {
+    labeled.at<float>(locations[i].y, locations[i].x) = reverse_idx[labels[i]] + 1;
+  }
+  return (labeled);
+}
+
+#ifdef PRINT_IMAGE_HISTOGRAM
+static void print_image_histogram(cv::Mat & img, const int hbins, float minVal, float maxVal)
+{
+  int channels[1] = {0};  // only one channel
+  cv::MatND hist;
+  const int histSize[1] = {hbins};
+  const float franges[2] = {minVal, maxVal};
+  const float * ranges[1] = {franges};
+  cv::calcHist(
+    &img, 1 /* num images */, channels, cv::Mat(), hist, 1 /* dim of hist */,
+    histSize /* num bins */, ranges /* frequency range */, true /* histogram is uniform */,
+    false /* don't accumulate */);
+  for (int i = 0; i < hbins; i++) {
+    double lv = minVal + (maxVal - minVal) * (float)i / hbins;
+    printf("%6.2f %8.0f\n", lv, hist.at<float>(i));
+  }
+}
+#endif
 
 void FrequencyCam::publishImage()
 {
   if (imagePub_.getNumSubscribers() != 0 && height_ != 0) {
     cv::Mat rawImg = makeRawFrequencyImage();
+    //cv::Mat labeledImage = labelImage(rawImg);
     cv::Mat scaled;
-    double range;
-    double minVal;
-    double maxVal;
-    if (freq_[1] < 0) {
-      // no max frequency specified, calculate highest frequency
-      cv::Point minLoc, maxLoc;
-      cv::minMaxLoc(rawImg, &minVal, &maxVal, &minLoc, &maxLoc);
-    } else {
-      maxVal = std::log10(freq_[1]);  // override upper bound
-    }
-    minVal = std::log10(freq_[0]);  // override lower bound no matter what
-
-    range = maxVal - minVal;
-    cv::convertScaleAbs(rawImg, scaled, 255.0 / range, -minVal * 255.0 / range);
-#if 0    
-    std::cout << "minval: " << minVal << " maxval: " << maxVal << std::endl;
-    std::cout << "published: " << rawImg.at<float>(debugY_, debugX_)
-              << " scaled: " << (int)scaled.at<uint8_t>(debugY_, debugX_) << std::endl;
+    double minVal = tfFreq_[0];
+    double maxVal = tfFreq_[1];
+    if (numClusters_ == 0) {
+      if (freq_[1] < 0) {
+        compute_max(rawImg, &maxVal);
+      }
+#ifdef PRINT_IMAGE_HISTOGRAM
+      print_image_histogram(rawImg, 10, minVal, maxVal);
 #endif
+      const double range = maxVal - minVal;
+      cv::convertScaleAbs(rawImg, scaled, 255.0 / range, -minVal * 255.0 / range);
+    } else {
+      std::vector<float> centers;
+      cv::Mat labeled = label_image(rawImg, minVal, maxVal, numClusters_, &centers);
+      const double minLabel = 0;
+      const double maxLabel = numClusters_;  // labels range from 0 (invalid) to numClusters_ (incl)
+      const double range = maxLabel - minLabel;
+      cv::convertScaleAbs(labeled, scaled, 255.0 / range, -minLabel * 255.0 / range);
+      if (!centers.empty()) {
+        // print out centers to console
+        std::stringstream ss;
+        std::string s = ss.str();
+        for (const auto & c : centers) {
+          ss << " " << std::fixed << std::setw(10) << std::setprecision(6) << c;
+        }
+        RCLCPP_INFO(get_logger(), ss.str().c_str());
+      }
+    }
+
     cv::Mat colorImg;
 
     cv::applyColorMap(scaled, colorImg, cv::COLORMAP_JET);
@@ -285,26 +368,6 @@ void FrequencyCam::publishImage()
     imagePub_.publish(cv_bridge::CvImage(header_, "bgr8", colorImg).toImageMsg());
   }
 }
-
-/*
-def filter_noise(d, dt_pass, dt_dead):
-    t = d[:, 0] * 1e-9
-    p = d[:, 1].astype(np.int32) * 2 - 1
-    d_f = []
-    skip_counter = 0
-    for i in range(4, d.shape[0]):
-        if skip_counter == 0:
-            d_f.append((d[i - 4, 0], d[i - 4, 1]))
-        else:
-            skip_counter -= 1
-        if p[i - 2] < 0 and p[i - 1] > 0 and \
-           t[i - 1] - t[i - 2] < dt_pass and \
-           t[i - 2] - t[i - 3] > dt_dead:
-            skip_counter = 4
-    n_filt = d.shape[0] - len(d_f)
-    print(f'filtered {n_filt} of {d.shape[0]} events ({n_filt/d.shape[0]}%)')
-    return np.array(d_f)
-*/
 
 bool FrequencyCam::filterNoise(State * s, const Event & newEvent, Event * e_f)
 {
@@ -407,7 +470,7 @@ void FrequencyCam::statistics()
   if (eventCount_ > 0 && totTime_ > 0) {
     const double usec = static_cast<double>(totTime_);
     RCLCPP_INFO(
-      this->get_logger(), "%6.2f Mev/s, %8.2f msgs/s, %8.2f nsec/ev  %6.0f usec/msg, drop: %3ld",
+      get_logger(), "%6.2f Mev/s, %8.2f msgs/s, %8.2f nsec/ev  %6.0f usec/msg, drop: %3ld",
       double(eventCount_) / usec, msgCount_ * 1.0e6 / usec, 1e3 * usec / (double)eventCount_,
       usec / msgCount_, droppedSeq_);
     eventCount_ = 0;

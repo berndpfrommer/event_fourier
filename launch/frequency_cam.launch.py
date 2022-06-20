@@ -44,6 +44,8 @@ def launch_setup(context, *args, **kwargs):
              'reset_threshold': 5.0,
              'debug_x': 319,
              'debug_y': 239,
+             'num_frequency_clusters': 4,
+             'use_log_frequency': True,
 #             'roi': [319, 239, 2, 2],
 #             'roi': [315, 235, 10, 10],
 #             'roi': [300, 220, 40, 40],             

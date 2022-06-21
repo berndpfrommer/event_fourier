@@ -23,6 +23,7 @@
 #include <image_transport/image_transport.hpp>
 #include <iostream>
 #include <opencv2/core/core.hpp>
+#include <opencv2/imgproc.hpp>
 #include <rclcpp/rclcpp.hpp>
 #include <vector>
 
@@ -65,16 +66,21 @@ private:
   bool initialize();
   void initializeState(uint32_t width, uint32_t height, uint64_t t);
   void callbackEvents(EventArrayConstPtr msg);
+  cv::Mat addLegend(
+    const cv::Mat & img, const double minVal, const double maxVal,
+    const std::vector<float> & centers) const;
   void publishImage();
   void statistics();
   void updateState(State * state, const Event & e);
   struct NoTF
   {
     static double tf(double f) { return (f); }
+    static double inv(double f) { return (f); }
   };
   struct LogTF
   {
     static double tf(double f) { return (std::log10(f)); }
+    static double inv(double f) { return (std::pow(10.0, f)); }
   };
   template <class T>
   cv::Mat makeTransformedFrequencyImage() const
@@ -112,7 +118,6 @@ private:
   }
 
   bool filterNoise(State * state, const Event & newEvent, Event * e_f);
-
   // ------ variables ----
   rclcpp::Time lastTime_{0};
   uint64_t sliceTime_{0};
@@ -132,6 +137,8 @@ private:
   double tfFreq_[2]{0, 1.0};     // transformed frequency range
   bool useLogFrequency_{false};  // visualize log10(frequency)
   int numClusters_{0};           // number of freq clusters for image
+  int legendWidth_{0};           // width of legend in pixels
+  cv::ColormapTypes colorMap_{cv::COLORMAP_JET};
   uint32_t width_;
   uint32_t height_;
   uint64_t eventCount_{0};

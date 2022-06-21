@@ -51,13 +51,13 @@ private:
   struct State  // per-pixel filter state
   {
     variable_t t_flip{0};     // time of last flip
-    bool upper_half{false};   // whether signal is in upper or lower half
     variable_t t{0};          // last time stamp
     variable_t p{0};          // lagged polarity of events
     variable_t x[2]{0, 0};    // current and lagged signal x
     variable_t dt_avg{-1.0};  // average sample time (time between events)
-    uint8_t skip{4};          // counter for noise filter
     Event e[4];               // buffer of events for noise filter
+    bool upper_half{false};   // whether signal is in upper or lower half
+    uint8_t skip{4};          // counter for noise filter
     uint8_t idx{0};           // index pointer into noise event buffer
   };
   using EventArray = event_array_msgs::msg::EventArray;

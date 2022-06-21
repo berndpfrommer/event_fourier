@@ -459,19 +459,8 @@ bool FrequencyCam::filterNoise(State * s, const Event & newEvent, Event * e_f)
   if (s->skip == 0) {
     eventAvailable = true;
     *e_f = e[lag_4];  // return the one that is 3 events old
-#ifdef EXTRA_DEBUG
-    //debug2 << e[lag_4].t << " " << (int)e[lag_4].polarity << std::endl;
-    debug2 << "accept: " << e[lag_4] << " " << e[lag_3] << " " << e[lag_2] << " " << e[lag_1]
-           << std::endl;
-#endif
   } else {
     s->skip--;
-#ifdef EXTRA_DEBUG
-    debug2 << "skip:   " << e[lag_4] << " " << e[lag_3] << " " << e[lag_2] << " " << e[lag_1]
-           << std::endl;
-#endif
-    //const Event & e_s = e[(s->idx + 1) & 0x03];
-    //debug2 << "skipping " << e_s.t << " " << (int)e_s.polarity << std::endl;
   }
   // if a DOWN event is followed quickly by an UP event, and
   // if before the DOWN event a significant amount of time has passed,
@@ -480,23 +469,12 @@ bool FrequencyCam::filterNoise(State * s, const Event & newEvent, Event * e_f)
   if (
     (!e[lag_2].polarity && e[lag_1].polarity) && (e[lag_1].t - e[lag_2].t < noiseFilterDtPass_) &&
     (e[lag_2].t - e[lag_3].t > noiseFilterDtDead_)) {
-#ifdef EXTRA_DEBUG
-    debug2 << "SKIP:   " << e[lag_4] << " " << e[lag_3] << " " << e[lag_2] << " " << e[lag_1] << " "
-           << e[lag_1].t - e[lag_2].t << " vs " << noiseFilterDtPass_ << " "
-           << e[lag_2].t - e[lag_3].t << " vs " << noiseFilterDtDead_ << std::endl;
-#endif
     s->skip = 4;
-  } else {
-#ifdef EXTRA_DEBUG
-    debug2 << "GOOD:   " << e[lag_4] << " " << e[lag_3] << " " << e[lag_2] << " " << e[lag_1] << " "
-           << e[lag_1].t - e[lag_2].t << " vs " << noiseFilterDtPass_ << " "
-           << e[lag_2].t - e[lag_3].t << " vs " << noiseFilterDtDead_ << std::endl;
-#endif
   }
   // advance circular buffer pointer and store latest event
-  s->idx = (s->idx + 1) & 0x03;
+  s->idx = lag_4;
   e[s->idx] = newEvent;
-  // signal whether a filtered event was produced, i.e *e_f is valid
+  // signal whether a filtered event was produced, i.e if *e_f is valid
   return (eventAvailable);
 }
 

@@ -82,8 +82,21 @@ private:
     static double tf(double f) { return (std::log10(f)); }
     static double inv(double f) { return (std::pow(10.0, f)); }
   };
-  template <class T>
-  cv::Mat makeTransformedFrequencyImage() const
+  struct EventFrameUpdater
+  {
+    static void update(cv::Mat * img, int ix, int iy, double dt, double dtMax)
+    {
+      if (dt < dtMax) {
+        img->at<uint8_t>(iy, ix) = 255;
+      }
+    }
+  };
+  struct NoEventFrameUpdater
+  {
+    static void update(cv::Mat *, int, int, double, double){};
+  };
+  template <class T, class U>
+  cv::Mat makeTransformedFrequencyImage(cv::Mat * eventFrame) const
   {
     const double lastEventTime = 1e-9 * lastEventTime_;
     cv::Mat rawImg(height_, width_, CV_32FC1, 0.0);
@@ -99,6 +112,7 @@ private:
         // for more than two periods of the minimum allowed
         // frequency or two periods of the actual estimated
         // period
+        U::update(eventFrame, ix, iy, dt, eventImageDt_);
         if (dt < maxDt && dt * f < 2) {
           rawImg.at<float>(iy, ix) = std::max(T::tf(f), minFreq);
         } else {
@@ -109,13 +123,7 @@ private:
     return (rawImg);
   }
 
-  cv::Mat makeRawFrequencyImage()
-  {
-    if (useLogFrequency_) {
-      return (makeTransformedFrequencyImage<LogTF>());
-    }
-    return (makeTransformedFrequencyImage<NoTF>());
-  }
+  cv::Mat makeFrequencyAndEventImage(cv::Mat * eventImage);
 
   bool filterNoise(State * state, const Event & newEvent, Event * e_f);
   // ------ variables ----
@@ -133,14 +141,10 @@ private:
   uint32_t iyStart_;
   uint32_t iyEnd_;
   State * state_{0};
-  double freq_[2]{-1.0, -1.0};   // frequency range
-  double tfFreq_[2]{0, 1.0};     // transformed frequency range
-  bool useLogFrequency_{false};  // visualize log10(frequency)
-  int numClusters_{0};           // number of freq clusters for image
-  int legendWidth_{0};           // width of legend in pixels
-  cv::ColormapTypes colorMap_{cv::COLORMAP_JET};
-  uint32_t width_;
-  uint32_t height_;
+  double freq_[2]{-1.0, -1.0};  // frequency range
+  double tfFreq_[2]{0, 1.0};    // transformed frequency range
+  uint32_t width_;              // image width
+  uint32_t height_;             // image height
   uint64_t eventCount_{0};
   uint64_t msgCount_{0};
   uint64_t lastCount_{0};
@@ -158,6 +162,14 @@ private:
   // ---------- dark noise filtering
   uint64_t noiseFilterDtPass_{0};
   uint64_t noiseFilterDtDead_{0};
+  // ---------- visualization
+  bool useLogFrequency_{false};                   // visualize log10(frequency)
+  int numClusters_{0};                            // number of freq clusters for image
+  int legendWidth_{0};                            // width of legend in pixels
+  cv::ColormapTypes colorMap_{cv::COLORMAP_JET};  // colormap for freq
+  double eventImageDt_{0};                        // time slice for event visualization
+  bool overlayEvents_{false};
+  //
   // ------------------ debugging stuff
   uint16_t debugX_{0};
   uint16_t debugY_{0};

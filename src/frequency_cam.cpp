@@ -88,6 +88,7 @@ bool FrequencyCam::initialize()
     RCLCPP_INFO_STREAM(get_logger(), "NOT clustering by frequency!");
   }
   legendWidth_ = this->declare_parameter<int>("legend_width", 100);
+  overlayEvents_ = this->declare_parameter<bool>("overlay_events", false);
   dtMix_ = static_cast<float>(this->declare_parameter<double>("dt_averaging_alpha", 0.1));
   dtDecay_ = 1.0 - dtMix_;
   const double T_prefilter =
@@ -121,6 +122,7 @@ bool FrequencyCam::initialize()
     eventSub_ = this->create_subscription<EventArray>(
       "~/events", qos, std::bind(&FrequencyCam::callbackEvents, this, std::placeholders::_1));
     double T = 1.0 / std::max(this->declare_parameter<double>("publishing_frequency", 20.0), 1.0);
+    eventImageDt_ = T;
     pubTimer_ = rclcpp::create_timer(
       this, this->get_clock(), rclcpp::Duration::from_seconds(T), [=]() { this->publishImage(); });
     statsTimer_ = rclcpp::create_timer(
@@ -386,11 +388,26 @@ cv::Mat FrequencyCam::addLegend(
   return (window);
 }
 
+cv::Mat FrequencyCam::makeFrequencyAndEventImage(cv::Mat * eventImage)
+{
+  if (overlayEvents_) {
+    *eventImage = cv::Mat::zeros(height_, width_, CV_8UC1);
+  }
+  if (useLogFrequency_) {
+    return (
+      overlayEvents_ ? makeTransformedFrequencyImage<LogTF, EventFrameUpdater>(eventImage)
+                     : makeTransformedFrequencyImage<LogTF, NoEventFrameUpdater>(eventImage));
+  }
+  return (
+    overlayEvents_ ? makeTransformedFrequencyImage<NoTF, EventFrameUpdater>(eventImage)
+                   : makeTransformedFrequencyImage<NoTF, NoEventFrameUpdater>(eventImage));
+}
+
 void FrequencyCam::publishImage()
 {
   if (imagePub_.getNumSubscribers() != 0 && height_ != 0) {
-    cv::Mat rawImg = makeRawFrequencyImage();
-    //cv::Mat labeledImage = labelImage(rawImg);
+    cv::Mat eventImg;
+    cv::Mat rawImg = makeFrequencyAndEventImage(&eventImg);
     cv::Mat scaled;
     double minVal = tfFreq_[0];
     double maxVal = tfFreq_[1];
@@ -411,7 +428,7 @@ void FrequencyCam::publishImage()
       const double range = maxVal - minVal;
       cv::convertScaleAbs(labeled, scaled, 255.0 / range, -minVal * 255.0 / range);
       if (!centers.empty()) {
-        // print out centers to console
+        // print out cluster centers to console
         std::stringstream ss;
         for (const auto & c : centers) {
           ss << " " << std::fixed << std::setw(10) << std::setprecision(6) << c;
@@ -419,9 +436,12 @@ void FrequencyCam::publishImage()
         RCLCPP_INFO(get_logger(), ss.str().c_str());
       }
     }
-
     cv::Mat colorImg;
     cv::applyColorMap(scaled, colorImg, colorMap_);
+    if (overlayEvents_) {
+      const cv::Scalar eventColor = CV_RGB(127, 127, 127);
+      colorImg.setTo(eventColor, (scaled == 0) & eventImg);
+    }
     cv::Mat imgWithLegend = addLegend(colorImg, minVal, maxVal, centers);
     imagePub_.publish(cv_bridge::CvImage(header_, "bgr8", imgWithLegend).toImageMsg());
   }

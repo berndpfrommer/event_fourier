@@ -172,7 +172,7 @@ private:
   // ---------- multithreading
   std::vector<std::thread> threads_;
   std::atomic<bool> keepRunning_{true};
-  using EventBuffer = SynchronizedBuffer<Event>;
+  using EventBuffer = SynchronizedBuffer;
   std::vector<EventBuffer> eventBuffer_;
   // ---------- visualization
   bool useLogFrequency_{false};                   // visualize log10(frequency)

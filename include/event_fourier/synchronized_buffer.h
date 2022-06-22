@@ -23,23 +23,28 @@
 
 namespace event_fourier
 {
-template <class T>
 class SynchronizedBuffer
 {
 public:
   // need to define these to make compiler errors related to
   // mutex not being copyable go away
-  SynchronizedBuffer(size_t reserveSize = 1) { buffer_.reserve(reserveSize); }
-  SynchronizedBuffer(const SynchronizedBuffer & b) { buffer_.reserve(b.buffer_.capacity()); }
-  SynchronizedBuffer & operator=(const SynchronizedBuffer & b)
+  SynchronizedBuffer() {}
+  SynchronizedBuffer(const SynchronizedBuffer &) {}
+  SynchronizedBuffer & operator=(const SynchronizedBuffer &);
+
+  // set pointer to event buffer and time base
+  void set_events(const std::vector<uint8_t> * events, uint64_t timeBase)
   {
-    buffer_.reserve(b.buffer_.capacity());
+    events_ = events;
+    timeBase_ = timeBase;
   }
 
-  // add to buffer
-  void add(const T & e) { buffer_.push_back(e); }
-
-  const std::vector<T> & get_elements() { return (buffer_); }
+  // get pointer to event buffer and time base
+  uint64_t get_events(const std::vector<uint8_t> ** events)
+  {
+    *events = events_;
+    return (timeBase_);
+  }
 
   void writer_done()
   {
@@ -58,7 +63,6 @@ public:
   void reader_done()
   {
     std::unique_lock<std::mutex> lock(mutex_);
-    buffer_.clear();    // should not change the capacity
     isWriting_ = true;  // it's the writer's turn now
     cv_.notify_all();
   }
@@ -73,10 +77,11 @@ public:
   }
 
 private:
-  std::vector<T> buffer_;
+  const std::vector<uint8_t> * events_;
+  uint64_t timeBase_{0};
   std::mutex mutex_;
   std::condition_variable cv_;
-  bool isWriting_{false};
+  bool isWriting_{true};
 };
 }  // namespace event_fourier
 #endif  // EVENT_FOURIER__SYNCHRONIZED_BUFFER_H_

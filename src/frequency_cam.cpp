@@ -169,13 +169,20 @@ void FrequencyCam::worker(unsigned int id)
   auto & b = eventBuffer_[id];
   while (keepRunning_) {
     b.wait_until_write_complete();
-    const auto & events = b.get_elements();
-    for (const auto & e : events) {
-      const size_t offset = e.y * width_ + e.x;
-      State & s = state_[offset];
-      Event e_f;  // filtered event, from the past
-      if (filterNoise(&s, e, &e_f)) {
-        updateState(&s, e_f);
+    const std::vector<uint8_t> * events;
+    uint64_t timeBase = b.get_events(&events);
+    const uint8_t * p_base = &(*events)[0];
+    for (const uint8_t * p = p_base; p < p_base + events->size();
+         p += event_array_msgs::mono::bytes_per_event) {
+      Event e;
+      e.polarity = event_array_msgs::mono::decode_t_x_y_p(p, timeBase, &e.t, &e.x, &e.y);
+      if (e.y % threads_.size() == id) {
+        const size_t offset = e.y * width_ + e.x;
+        State & s = state_[offset];
+        Event e_f;  // filtered event, from the past
+        if (filterNoise(&s, e, &e_f)) {
+          updateState(&s, e_f);
+        }
       }
     }
     b.reader_done();
@@ -548,21 +555,12 @@ uint64_t FrequencyCam::updateSingleThreaded(uint64_t timeBase, const std::vector
 
 uint64_t FrequencyCam::updateMultiThreaded(uint64_t timeBase, const std::vector<uint8_t> & events)
 {
-  uint64_t lastEventTime(0);
   const uint8_t * p_base = &events[0];
-  for (const uint8_t * p = p_base; p < p_base + events.size();
-       p += event_array_msgs::mono::bytes_per_event) {
-    Event e;
-    e.polarity = event_array_msgs::mono::decode_t_x_y_p(p, timeBase, &e.t, &e.x, &e.y);
-    lastEventTime = e.t;
-    // assigning consecutive lines to the same processor gives poor
-    // load balancing because under load the camera delivers events in bulk,
-    // in row-major order
-    const unsigned int id = e.y % threads_.size();
-    eventBuffer_[id].add(e);
-  }
+  const uint8_t * p_last_event = p_base + events.size() - event_array_msgs::mono::bytes_per_event;
+  uint64_t lastEventTime = event_array_msgs::mono::decode_t(p_last_event, timeBase);
   // tell consumers to start working
   for (auto & b : eventBuffer_) {
+    b.set_events(&events, timeBase);
     b.writer_done();
   }
   // wait for consumers to finish

@@ -16,6 +16,7 @@
 #ifndef EVENT_FOURIER__FREQUENCY_CAM_H_
 #define EVENT_FOURIER__FREQUENCY_CAM_H_
 
+#include <event_fourier/synchronized_buffer.h>
 #include <stdlib.h>
 
 #include <cstdlib>
@@ -25,6 +26,7 @@
 #include <opencv2/core/core.hpp>
 #include <opencv2/imgproc.hpp>
 #include <rclcpp/rclcpp.hpp>
+#include <thread>
 #include <vector>
 
 namespace event_fourier
@@ -126,6 +128,11 @@ private:
   cv::Mat makeFrequencyAndEventImage(cv::Mat * eventImage);
 
   bool filterNoise(State * state, const Event & newEvent, Event * e_f);
+  void startThreads();
+  void worker(unsigned int id);
+  uint64_t updateMultiThreaded(uint64_t timeBase, const std::vector<uint8_t> & events);
+  uint64_t updateSingleThreaded(uint64_t timeBase, const std::vector<uint8_t> & events);
+
   // ------ variables ----
   rclcpp::Time lastTime_{0};
   uint64_t sliceTime_{0};
@@ -162,6 +169,11 @@ private:
   // ---------- dark noise filtering
   uint64_t noiseFilterDtPass_{0};
   uint64_t noiseFilterDtDead_{0};
+  // ---------- multithreading
+  std::vector<std::thread> threads_;
+  std::atomic<bool> keepRunning_{true};
+  using EventBuffer = SynchronizedBuffer<Event>;
+  std::vector<EventBuffer> eventBuffer_;
   // ---------- visualization
   bool useLogFrequency_{false};                   // visualize log10(frequency)
   int numClusters_{0};                            // number of freq clusters for image

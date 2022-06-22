@@ -28,6 +28,7 @@
 #include <rosbag2_cpp/reader.hpp>
 #include <rosbag2_cpp/readers/sequential_reader.hpp>
 #include <sstream>
+#include <thread>
 
 //#define DEBUG
 //#define PRINT_IMAGE_HISTOGRAM
@@ -48,7 +49,19 @@ FrequencyCam::FrequencyCam(const rclcpp::NodeOptions & options) : Node("event_fo
   }
 }
 
-FrequencyCam::~FrequencyCam() { delete[] state_; }
+FrequencyCam::~FrequencyCam()
+{
+  // need to send signal to worker threads that they can exit
+  keepRunning_ = false;
+  for (auto & b : eventBuffer_) {
+    b.writer_done();
+  }
+  // then harvest threads
+  for (auto & th : threads_) {
+    th.join();
+  }
+  delete[] state_;
+}
 
 static double compute_alpha_prefilter(const double T_cut)
 {
@@ -60,8 +73,6 @@ static double compute_alpha_prefilter(const double T_cut)
   const double a = -0.5 * (b + std::sqrt(b * b - 4 * c));
   return (0.5 * (a - std::sqrt(a * a - 4)));
 }
-
-// a1: 1.874160776773375 a2: -0.8781196542989451 a3: 0.9685401941933438
 
 bool FrequencyCam::initialize()
 {
@@ -118,6 +129,7 @@ bool FrequencyCam::initialize()
       get_logger(),
       "using roi: (" << roi_[0] << ", " << roi_[1] << ") w: " << roi_[2] << " h: " << roi_[3]);
   }
+  startThreads();
   if (bag.empty()) {
     eventSub_ = this->create_subscription<EventArray>(
       "~/events", qos, std::bind(&FrequencyCam::callbackEvents, this, std::placeholders::_1));
@@ -132,6 +144,42 @@ bool FrequencyCam::initialize()
     readEventsFromBag(bag);
   }
   return (true);
+}
+
+void FrequencyCam::startThreads()
+{
+  const int numThreads = std::min(
+    std::thread::hardware_concurrency(),
+    static_cast<unsigned int>(this->declare_parameter<int>("worker_threads", 24)));
+
+  if (numThreads >= 1) {
+    RCLCPP_INFO_STREAM(get_logger(), "running with " << numThreads << " threads");
+    eventBuffer_.resize(numThreads);  // create one buffer per thread
+    threads_.resize(numThreads);
+    for (auto id = decltype(numThreads){0}; id < numThreads; id++) {
+      threads_[id] = std::thread(&FrequencyCam::worker, this, id);
+    }
+  } else {
+    RCLCPP_INFO_STREAM(get_logger(), "running single threaded!");
+  }
+}
+
+void FrequencyCam::worker(unsigned int id)
+{
+  auto & b = eventBuffer_[id];
+  while (keepRunning_) {
+    b.wait_until_write_complete();
+    const auto & events = b.get_elements();
+    for (const auto & e : events) {
+      const size_t offset = e.y * width_ + e.x;
+      State & s = state_[offset];
+      Event e_f;  // filtered event, from the past
+      if (filterNoise(&s, e, &e_f)) {
+        updateState(&s, e_f);
+      }
+    }
+    b.reader_done();
+  }
 }
 
 void FrequencyCam::readEventsFromBag(const std::string & bagName)
@@ -478,15 +526,61 @@ bool FrequencyCam::filterNoise(State * s, const Event & newEvent, Event * e_f)
   return (eventAvailable);
 }
 
+uint64_t FrequencyCam::updateSingleThreaded(uint64_t timeBase, const std::vector<uint8_t> & events)
+{
+  uint64_t lastEventTime(0);
+  const uint8_t * p_base = &events[0];
+
+  for (const uint8_t * p = p_base; p < p_base + events.size();
+       p += event_array_msgs::mono::bytes_per_event) {
+    Event e;
+    e.polarity = event_array_msgs::mono::decode_t_x_y_p(p, timeBase, &e.t, &e.x, &e.y);
+    lastEventTime = e.t;
+    const size_t offset = e.y * width_ + e.x;
+    State & s = state_[offset];
+    Event e_f;  // filtered event, from the past
+    if (filterNoise(&s, e, &e_f)) {
+      updateState(&s, e_f);
+    }
+  }
+  return (lastEventTime);
+}
+
+uint64_t FrequencyCam::updateMultiThreaded(uint64_t timeBase, const std::vector<uint8_t> & events)
+{
+  uint64_t lastEventTime(0);
+  const uint8_t * p_base = &events[0];
+  for (const uint8_t * p = p_base; p < p_base + events.size();
+       p += event_array_msgs::mono::bytes_per_event) {
+    Event e;
+    e.polarity = event_array_msgs::mono::decode_t_x_y_p(p, timeBase, &e.t, &e.x, &e.y);
+    lastEventTime = e.t;
+    // assigning consecutive lines to the same processor gives poor
+    // load balancing because under load the camera delivers events in bulk,
+    // in row-major order
+    const unsigned int id = e.y % threads_.size();
+    eventBuffer_[id].add(e);
+  }
+  // tell consumers to start working
+  for (auto & b : eventBuffer_) {
+    b.writer_done();
+  }
+  // wait for consumers to finish
+  for (auto & b : eventBuffer_) {
+    b.wait_until_read_complete();
+  }
+  return (lastEventTime);
+}
+
 void FrequencyCam::callbackEvents(EventArrayConstPtr msg)
 {
   const auto t_start = std::chrono::high_resolution_clock::now();
   const auto time_base =
     useSensorTime_ ? msg->time_base : rclcpp::Time(msg->header.stamp).nanoseconds();
   lastTime_ = rclcpp::Time(msg->header.stamp);
-  const size_t BYTES_PER_EVENT = 8;
 
   if (state_ == 0 && !msg->events.empty()) {
+    // first event ever, need to allocate state
     const uint8_t * p = &msg->events[0];
     uint64_t t;
     uint16_t x, y;
@@ -497,22 +591,9 @@ void FrequencyCam::callbackEvents(EventArrayConstPtr msg)
     header_ = msg->header;  // copy frame id
     lastSeq_ = msg->seq - 1;
   }
-  const uint8_t * p_base = &msg->events[0];
-
-  uint64_t lastEventTime(0);
-  for (const uint8_t * p = p_base; p < p_base + msg->events.size(); p += BYTES_PER_EVENT) {
-    Event e;
-    e.polarity = event_array_msgs::mono::decode_t_x_y_p(p, time_base, &e.t, &e.x, &e.y);
-    lastEventTime = e.t;
-    const size_t offset = e.y * width_ + e.x;
-    State & s = state_[offset];
-    Event e_f;  // filtered event, from the past
-    if (filterNoise(&s, e, &e_f)) {
-      updateState(&s, e_f);
-    }
-  }
-  lastEventTime_ = lastEventTime;
-  eventCount_ += msg->events.size() >> 3;
+  lastEventTime_ = (!threads_.empty()) ? updateMultiThreaded(time_base, msg->events)
+                                       : updateSingleThreaded(time_base, msg->events);
+  eventCount_ += msg->events.size() / event_array_msgs::mono::bytes_per_event;
   msgCount_++;
   droppedSeq_ += static_cast<int64_t>(msg->seq) - lastSeq_ - 1;
   lastSeq_ = static_cast<int64_t>(msg->seq);

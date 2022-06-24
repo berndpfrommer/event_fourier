@@ -511,7 +511,7 @@ void FrequencyCam::publishImage()
 
 bool FrequencyCam::filterNoise(State * s, const Event & newEvent, Event * e_f)
 {
-  auto * e = s->e;
+  auto * tp = s->tp;  // time and polarity
   bool eventAvailable(false);
   const uint8_t lag_1 = s->idx;
   const uint8_t lag_2 = (s->idx + 3) & 0x03;
@@ -520,7 +520,7 @@ bool FrequencyCam::filterNoise(State * s, const Event & newEvent, Event * e_f)
 
   if (s->skip == 0) {
     eventAvailable = true;
-    *e_f = e[lag_4];  // return the one that is 3 events old
+    e_f->setTimeAndPolarity(tp[lag_4]);  // return the one that is 3 events old
   } else {
     s->skip--;
   }
@@ -529,13 +529,13 @@ bool FrequencyCam::filterNoise(State * s, const Event & newEvent, Event * e_f)
   // the DOWN/UP is almost certainly a noise event that needs to be
   // filtered out
   if (
-    (!e[lag_2].polarity && e[lag_1].polarity) && (e[lag_1].t - e[lag_2].t < noiseFilterDtPass_) &&
-    (e[lag_2].t - e[lag_3].t > noiseFilterDtDead_)) {
+    (!tp[lag_2].p() && tp[lag_1].p()) && (tp[lag_1].t() - tp[lag_2].t() < noiseFilterDtPass_) &&
+    (tp[lag_2].t() - tp[lag_3].t() > noiseFilterDtDead_)) {
     s->skip = 4;
   }
   // advance circular buffer pointer and store latest event
   s->idx = lag_4;
-  e[s->idx] = newEvent;
+  tp[s->idx].set(newEvent.t, newEvent.polarity);
   // signal whether a filtered event was produced, i.e if *e_f is valid
   return (eventAvailable);
 }
@@ -552,7 +552,7 @@ uint64_t FrequencyCam::updateSingleThreaded(uint64_t timeBase, const std::vector
     lastEventTime = e.t;
     const size_t offset = e.y * width_ + e.x;
     State & s = state_[offset];
-    Event e_f;  // filtered event, from the past
+    Event e_f(e);  // filtered event, from the past
     if (filterNoise(&s, e, &e_f)) {
       updateState(&s, e_f);
     }
@@ -624,7 +624,8 @@ void FrequencyCam::statistics()
 
 std::ostream & operator<<(std::ostream & os, const FrequencyCam::Event & e)
 {
-  os << std::fixed << std::setw(10) << std::setprecision(6) << e.t * 1e-9 << " " << (int)e.polarity;
+  os << std::fixed << std::setw(10) << std::setprecision(6) << e.t * 1e-9 << " " << (int)e.polarity
+     << " " << e.x << " " << e.y;
   return (os);
 }
 

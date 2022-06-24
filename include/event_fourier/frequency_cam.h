@@ -42,8 +42,25 @@ public:
 
 private:
   typedef float variable_t;
-  struct Event  // event representation, needed for filtering
+  struct TimeAndPolarity  // keep time and polarity in one 64 bit variable
   {
+    void set(uint64_t t, bool p) { t_and_p = (t & ~0x1ULL) | p; }
+    inline bool p() const { return (static_cast<bool>(t_and_p & 0x1ULL)); }
+    inline uint64_t t() const { return (t_and_p & ~0x1ULL); }
+    uint64_t t_and_p;
+  };
+
+  struct Event  // event representation for convenience
+  {
+    Event(uint64_t ta = 0, uint16_t xa = 0, uint16_t ya = 0, bool p = false)
+    : t(ta), x(xa), y(ya), polarity(p)
+    {
+    }
+    inline void setTimeAndPolarity(const TimeAndPolarity & tp)
+    {
+      polarity = tp.p();
+      t = tp.t();
+    }
     uint64_t t;
     uint16_t x;
     uint16_t y;
@@ -52,14 +69,14 @@ private:
   friend std::ostream & operator<<(std::ostream & os, const Event & e);
   struct State  // per-pixel filter state
   {
-    Event e[4];         // buffer of events for noise filter
-    variable_t x[2];    // current and lagged signal x
-    variable_t t_flip;  // time of last flip
-    variable_t t;       // last time stamp
-    variable_t p;       // lagged polarity of events
-    variable_t dt_avg;  // average sample time (time between events)
-    uint8_t skip;       // counter for noise filter
-    uint8_t idx;        // index pointer into noise event buffer
+    TimeAndPolarity tp[4];  // circular buffer for noise filter
+    variable_t x[2];        // current and lagged signal x
+    variable_t t_flip;      // time of last flip
+    variable_t t;           // last time stamp
+    variable_t p;           // lagged polarity of events
+    variable_t dt_avg;      // average sample time (time between events)
+    uint8_t skip;           // counter for noise filter
+    uint8_t idx;            // index pointer into noise event buffer
   };
   using EventArray = event_array_msgs::msg::EventArray;
   using EventArrayConstPtr = EventArray::ConstSharedPtr;

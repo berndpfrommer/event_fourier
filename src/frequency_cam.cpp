@@ -213,8 +213,15 @@ void FrequencyCam::initializeState(uint32_t width, uint32_t height, uint64_t t)
   const variable_t t_sec = t * 1e-9;
   state_ = new State[width * height];
   for (size_t i = 0; i < width * height; i++) {
-    state_[i].t = t_sec;
-    state_[i].t_flip = t_sec;
+    State & s = state_[i];
+    s.t = t_sec;
+    s.t_flip = t_sec;
+    s.x[0] = 0;
+    s.x[1] = 0;
+    s.p = 0;
+    s.dt_avg = -1;
+    s.skip = 4;
+    s.idx = 0;
   }
   ixStart_ = std::max(0u, roi_[0]);
   iyStart_ = std::max(0u, roi_[1]);
@@ -504,7 +511,7 @@ void FrequencyCam::publishImage()
 
 bool FrequencyCam::filterNoise(State * s, const Event & newEvent, Event * e_f)
 {
-  Event * e = s->e;
+  auto * e = s->e;
   bool eventAvailable(false);
   const uint8_t lag_1 = s->idx;
   const uint8_t lag_2 = (s->idx + 3) & 0x03;

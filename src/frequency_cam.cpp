@@ -74,12 +74,15 @@ static double compute_alpha_prefilter(const double T_cut)
   return (0.5 * (a - std::sqrt(a * a - 4)));
 }
 
+static uint32_t shorten_time(uint64_t t)
+{
+  return (static_cast<uint32_t>((t / 1000) & 0xFFFFFFFF));
+}
+
 bool FrequencyCam::initialize()
 {
   rmw_qos_profile_t qosProf = rmw_qos_profile_default;
   imagePub_ = image_transport::create_publisher(this, "~/frequency_image", qosProf);
-  sliceTime_ =
-    static_cast<uint64_t>((std::abs(this->declare_parameter<double>("slice_time", 0.025) * 1e9)));
   const size_t EVENT_QUEUE_DEPTH(1000);
   auto qos = rclcpp::QoS(rclcpp::KeepLast(EVENT_QUEUE_DEPTH)).best_effort().durability_volatile();
   useSensorTime_ = this->declare_parameter<bool>("use_sensor_time", true);
@@ -111,8 +114,8 @@ bool FrequencyCam::initialize()
   c_p_ = 0.5 * (1 + beta_prefilter);
   const double dt_pass = this->declare_parameter<double>("noise_dt_pass", 15.0e-6);
   const double dt_dead = this->declare_parameter<double>("noise_dt_dead", dt_pass);
-  noiseFilterDtPass_ = static_cast<uint64_t>(std::abs(dt_pass) * 1e9);
-  noiseFilterDtDead_ = static_cast<uint64_t>(std::abs(dt_dead) * 1e9);
+  noiseFilterDtPass_ = static_cast<uint32_t>(std::abs(dt_pass) * 1e6);
+  noiseFilterDtDead_ = static_cast<uint32_t>(std::abs(dt_dead) * 1e6);
   resetThreshold_ = this->declare_parameter<double>("reset_threshold", 5.0);
 #ifdef DEBUG
   debugX_ = static_cast<uint16_t>(this->declare_parameter<int>("debug_x", 320));
@@ -175,7 +178,9 @@ void FrequencyCam::worker(unsigned int id)
     for (const uint8_t * p = p_base; p < p_base + events->size();
          p += event_array_msgs::mono::bytes_per_event) {
       Event e;
-      e.polarity = event_array_msgs::mono::decode_t_x_y_p(p, timeBase, &e.t, &e.x, &e.y);
+      uint64_t t;
+      e.polarity = event_array_msgs::mono::decode_t_x_y_p(p, timeBase, &t, &e.x, &e.y);
+      e.t = shorten_time(t);
       if (e.y % threads_.size() == id) {
         const size_t offset = e.y * width_ + e.x;
         State & s = state_[offset];
@@ -206,22 +211,22 @@ void FrequencyCam::readEventsFromBag(const std::string & bagName)
   RCLCPP_INFO(get_logger(), "finished playing bag");
 }
 
-void FrequencyCam::initializeState(uint32_t width, uint32_t height, uint64_t t)
+void FrequencyCam::initializeState(uint32_t width, uint32_t height, uint32_t t)
 {
+  RCLCPP_INFO_STREAM(
+    get_logger(), "state image size is: " << (width * height * sizeof(State)) / (1 << 20)
+                                          << "MB (better fit into CPU cache)");
   width_ = width;
   height_ = height;
-  const variable_t t_sec = t * 1e-9;
   state_ = new State[width * height];
   for (size_t i = 0; i < width * height; i++) {
     State & s = state_[i];
-    s.t = t_sec;
-    s.t_flip = t_sec;
+    s.t = t;
+    s.t_flip = t;
     s.x[0] = 0;
     s.x[1] = 0;
-    s.p = 0;
     s.dt_avg = -1;
-    s.skip = 4;
-    s.idx = 0;
+    s.p_skip_idx = PackedVar();
   }
   ixStart_ = std::max(0u, roi_[0]);
   iyStart_ = std::max(0u, roi_[1]);
@@ -235,9 +240,8 @@ void FrequencyCam::updateState(State * state, const Event & e)
   // prefiltering (detrend, accumulate, high pass)
   // x_k has the current filtered signal (log(illumination))
   //
-  const double t_sec = 1e-9 * e.t;
-  const auto p = e.polarity ? 1.0 : -1.0;
-  const auto dp = p - s.p;  // raw change in polarity
+  // raw change in polarity, will be 0 or +-1
+  const float dp = static_cast<int8_t>(e.polarity) - static_cast<int8_t>(s.p_skip_idx.p());
   const auto x_k = c_[0] * s.x[0] + c_[1] * s.x[1] + c_p_ * dp;
 #ifdef DEBUG_FULL
   if (e.x == debugX_ && e.y == debugY_) {
@@ -245,13 +249,14 @@ void FrequencyCam::updateState(State * state, const Event & e)
               << std::endl;
   }
 #endif
+
   if (x_k > 0 && s.x[0] <= 0) {
     // measure period upon transition from lower to upper half, i.e.
     // when ON events happen. This is more precise than on the other flank
-    const double dt = t_sec - s.t_flip;
+    const float dt = (e.t - s.t_flip) * 1e-6;
     if (s.dt_avg <= 0) {  // initialization phase
       if (s.dt_avg == 0) {
-        s.dt_avg = std::min(dt, 1.0);
+        s.dt_avg = std::min(dt, 1.0f);
 #ifdef DEBUG
         if (e.x == debugX_ && e.y == debugY_) {
           std::cout << "  init avg: " << s.dt_avg << std::endl;
@@ -259,13 +264,10 @@ void FrequencyCam::updateState(State * state, const Event & e)
 #endif
       } else {
         s.dt_avg = 0;  // signal that on next step dt can be computed
-        // std::cout << "  setting dt_avg to zero at " << t_sec << std::endl;
       }
-      s.t_flip = t_sec;
+      s.t_flip = e.t;
     } else {  // not in intialization phase
       if (dt > resetThreshold_ * s.dt_avg) {
-        //std::cout << t_sec << " restart avg dt: " << dt << " vs " << s.dt_avg
-        //<< " thresh: " << resetThreshold_ << std::endl;
         s.dt_avg = 0;  // restart
       } else {         // regular case: update
         s.dt_avg = s.dt_avg * dtDecay_ + dtMix_ * dt;
@@ -280,21 +282,21 @@ void FrequencyCam::updateState(State * state, const Event & e)
 #endif
 #ifdef DEBUG
     if (e.x == debugX_ && e.y == debugY_) {
-      debug_flip << std::setprecision(10) << t_sec << " " << dt << " " << s.dt_avg << std::endl;
+      debug_flip << std::setprecision(10) << e.t << " " << dt << " " << s.dt_avg << std::endl;
     }
 #endif
-    s.t_flip = t_sec;
+    s.t_flip = e.t;
   }
-  s.t = t_sec;
-  s.p = p;
+  s.t = e.t;
+  s.p_skip_idx.setPolarity(e.polarity);
   s.x[1] = s.x[0];
   s.x[0] = x_k;
 #ifdef DEBUG
   if (e.x == debugX_ && e.y == debugY_) {
-    const double dt = t_sec - s.t_flip;
+    const double dt = (e.t - s.t_flip) * 1e-6;
     const double f = s.dt_avg < 1e-6f ? 0 : (1.0 / s.dt_avg);
-    debug << t_sec << " " << x_k << " " << (int)s.upper_half << " " << dt << " " << s.dt_avg << " "
-          << f << std::endl;
+    debug << e.t << " " << x_k << " " << dt << " " << s.dt_avg << " " << f << " " << dp
+          << std::endl;
   }
 #endif
 }
@@ -511,18 +513,20 @@ void FrequencyCam::publishImage()
 
 bool FrequencyCam::filterNoise(State * s, const Event & newEvent, Event * e_f)
 {
-  auto * tp = s->tp;  // time and polarity
+  auto const * tp = s->tp;  // time and polarity
+  auto * tp_nc = s->tp;     // non-const
   bool eventAvailable(false);
-  const uint8_t lag_1 = s->idx;
-  const uint8_t lag_2 = (s->idx + 3) & 0x03;
-  const uint8_t lag_3 = (s->idx + 2) & 0x03;
-  const uint8_t lag_4 = (s->idx + 1) & 0x03;
+  const uint8_t idx = s->p_skip_idx.idx();
+  const uint8_t lag_1 = idx;  // alias to make code more readable
+  const uint8_t lag_2 = (idx + 3) & 0x03;
+  const uint8_t lag_3 = (idx + 2) & 0x03;
+  const uint8_t lag_4 = (idx + 1) & 0x03;
 
-  if (s->skip == 0) {
+  if (s->p_skip_idx.skip() == 0) {
     eventAvailable = true;
     e_f->setTimeAndPolarity(tp[lag_4]);  // return the one that is 3 events old
   } else {
-    s->skip--;
+    s->p_skip_idx.decSkip();  // decrement skip variable
   }
   // if a DOWN event is followed quickly by an UP event, and
   // if before the DOWN event a significant amount of time has passed,
@@ -531,24 +535,26 @@ bool FrequencyCam::filterNoise(State * s, const Event & newEvent, Event * e_f)
   if (
     (!tp[lag_2].p() && tp[lag_1].p()) && (tp[lag_1].t() - tp[lag_2].t() < noiseFilterDtPass_) &&
     (tp[lag_2].t() - tp[lag_3].t() > noiseFilterDtDead_)) {
-    s->skip = 4;
+    s->p_skip_idx.startSkip();
   }
   // advance circular buffer pointer and store latest event
-  s->idx = lag_4;
-  tp[s->idx].set(newEvent.t, newEvent.polarity);
+  s->p_skip_idx.setIdx(lag_4);
+  tp_nc[lag_4].set(newEvent.t, newEvent.polarity);
   // signal whether a filtered event was produced, i.e if *e_f is valid
   return (eventAvailable);
 }
 
-uint64_t FrequencyCam::updateSingleThreaded(uint64_t timeBase, const std::vector<uint8_t> & events)
+uint32_t FrequencyCam::updateSingleThreaded(uint64_t timeBase, const std::vector<uint8_t> & events)
 {
-  uint64_t lastEventTime(0);
+  uint32_t lastEventTime(0);
   const uint8_t * p_base = &events[0];
 
   for (const uint8_t * p = p_base; p < p_base + events.size();
        p += event_array_msgs::mono::bytes_per_event) {
     Event e;
-    e.polarity = event_array_msgs::mono::decode_t_x_y_p(p, timeBase, &e.t, &e.x, &e.y);
+    uint64_t t;
+    e.polarity = event_array_msgs::mono::decode_t_x_y_p(p, timeBase, &t, &e.x, &e.y);
+    e.t = shorten_time(t);
     lastEventTime = e.t;
     const size_t offset = e.y * width_ + e.x;
     State & s = state_[offset];
@@ -560,11 +566,11 @@ uint64_t FrequencyCam::updateSingleThreaded(uint64_t timeBase, const std::vector
   return (lastEventTime);
 }
 
-uint64_t FrequencyCam::updateMultiThreaded(uint64_t timeBase, const std::vector<uint8_t> & events)
+uint32_t FrequencyCam::updateMultiThreaded(uint64_t timeBase, const std::vector<uint8_t> & events)
 {
   const uint8_t * p_base = &events[0];
   const uint8_t * p_last_event = p_base + events.size() - event_array_msgs::mono::bytes_per_event;
-  uint64_t lastEventTime = event_array_msgs::mono::decode_t(p_last_event, timeBase);
+  uint32_t lastEventTime = shorten_time(event_array_msgs::mono::decode_t(p_last_event, timeBase));
   // tell consumers to start working
   for (auto & b : eventBuffer_) {
     b.set_events(&events, timeBase);
@@ -590,9 +596,7 @@ void FrequencyCam::callbackEvents(EventArrayConstPtr msg)
     uint64_t t;
     uint16_t x, y;
     (void)event_array_msgs::mono::decode_t_x_y_p(p, time_base, &t, &x, &y);
-    (void)x;
-    (void)y;
-    initializeState(msg->width, msg->height, t - 1000L /* - 1usec */);
+    initializeState(msg->width, msg->height, shorten_time(t) - 1 /* - 1usec */);
     header_ = msg->header;  // copy frame id
     lastSeq_ = msg->seq - 1;
   }
@@ -624,7 +628,7 @@ void FrequencyCam::statistics()
 
 std::ostream & operator<<(std::ostream & os, const FrequencyCam::Event & e)
 {
-  os << std::fixed << std::setw(10) << std::setprecision(6) << e.t * 1e-9 << " " << (int)e.polarity
+  os << std::fixed << std::setw(10) << std::setprecision(6) << e.t * 1e-6 << " " << (int)e.polarity
      << " " << e.x << " " << e.y;
   return (os);
 }

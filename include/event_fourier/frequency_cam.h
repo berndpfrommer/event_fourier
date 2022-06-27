@@ -99,6 +99,10 @@ private:
   bool initialize();
   void initializeState(uint32_t width, uint32_t height, uint32_t t);
   void callbackEvents(EventArrayConstPtr msg);
+  std::vector<float> findLegendValuesAndText(
+    const double minVal, const double maxVal, const std::vector<float> & centers,
+    std::vector<std::string> * text) const;
+
   cv::Mat addLegend(
     const cv::Mat & img, const double minVal, const double maxVal,
     const std::vector<float> & centers) const;
@@ -147,13 +151,8 @@ private:
         U::update(eventFrame, ix, iy, dt, eventImageDt_);
         if (dt < maxDt && dt * f < 2) {
           rawImg.at<float>(iy, ix) = std::max(T::tf(f), minFreq);
-          //std::cout << "good dt: " << dt << " " << f << std::endl;
         } else {
-#if 0          
-          std::cout << "bad dt: " << dt << " f: " << f << " dt * f " << dt * f << " max: " << maxDt
-                    << std::endl;
-#endif
-          rawImg.at<float>(iy, ix) = minFreq;
+          rawImg.at<float>(iy, ix) = 0;  // mark as invalid
         }
       }
     }
@@ -211,7 +210,10 @@ private:
   // ---------- visualization
   bool useLogFrequency_{false};                   // visualize log10(frequency)
   int numClusters_{0};                            // number of freq clusters for image
+  bool printClusterCenters_{false};               // if cluster centers should be printed
   int legendWidth_{0};                            // width of legend in pixels
+  std::vector<double> legendValues_;              // frequency values for which to show legend
+  size_t legendBins_;                             // # of bins if legend values are not given
   cv::ColormapTypes colorMap_{cv::COLORMAP_JET};  // colormap for freq
   double eventImageDt_{0};                        // time slice for event visualization
   bool overlayEvents_{false};

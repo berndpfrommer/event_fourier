@@ -17,6 +17,7 @@
 
 #include <cv_bridge/cv_bridge.h>
 #include <event_array_msgs/decode.h>
+#include <math.h>
 
 #include <algorithm>  // std::sort, std::stable_sort
 #include <fstream>
@@ -101,7 +102,13 @@ bool FrequencyCam::initialize()
   } else {
     RCLCPP_INFO_STREAM(get_logger(), "NOT clustering by frequency!");
   }
+  printClusterCenters_ = this->declare_parameter<bool>("print_cluster_centers", false);
   legendWidth_ = this->declare_parameter<int>("legend_width", 100);
+  legendValues_ =
+    this->declare_parameter<std::vector<double>>("legend_frequencies", std::vector<double>());
+  if (legendValues_.empty()) {
+    legendBins_ = this->declare_parameter<int>("legend_bins", 11);
+  }
   overlayEvents_ = this->declare_parameter<bool>("overlay_events", false);
   dtMix_ = static_cast<float>(this->declare_parameter<double>("dt_averaging_alpha", 0.1));
   dtDecay_ = 1.0 - dtMix_;
@@ -348,6 +355,9 @@ std::vector<size_t> sort_indexes(
   return (idx);
 }
 
+/*
+ * Find frequency labels by clustering
+ */
 static cv::Mat label_image(
   const cv::Mat & freqImg, float minVal, float maxVal, int K, std::vector<float> * centers)
 {
@@ -374,6 +384,9 @@ static cv::Mat label_image(
 }
 
 #ifdef PRINT_IMAGE_HISTOGRAM
+/*
+ * experimental code used during debugging of clustering
+ */
 static void print_image_histogram(cv::Mat & img, const int hbins, float minVal, float maxVal)
 {
   int channels[1] = {0};  // only one channel
@@ -392,12 +405,68 @@ static void print_image_histogram(cv::Mat & img, const int hbins, float minVal, 
 }
 #endif
 
+/*
+ * format frequency labels for opencv
+ */
 static std::string format_freq(double v)
 {
   std::stringstream ss;
   //ss << " " << std::fixed << std::setw(7) << std::setprecision(1) << v;
   ss << " " << std::setw(6) << (int)v;
   return (ss.str());
+}
+
+static void draw_labeled_rectangle(
+  cv::Mat * window, int x_off, int y_off, int height, const std::string & text,
+  const cv::Vec3b & color)
+{
+  const cv::Point tl(x_off, y_off);                      // top left
+  const cv::Point br(window->cols - 1, y_off + height);  // bottom right
+  cv::rectangle(*window, tl, br, color, -1 /* filled */, cv::LINE_8);
+  // place text
+  const cv::Point tp(x_off - 2, y_off + height / 2 - 2);
+  const cv::Scalar textColor = CV_RGB(0, 0, 0);
+  cv::putText(
+    *window, text, tp, cv::FONT_HERSHEY_PLAIN, 1.0, textColor, 2.0 /*thickness*/,
+    cv::LINE_AA /* anti-alias */);
+}
+
+std::vector<float> FrequencyCam::findLegendValuesAndText(
+  const double minVal, const double maxVal, const std::vector<float> & centers,
+  std::vector<std::string> * text) const
+{
+  std::vector<float> values;
+  if (legendValues_.empty()) {
+    // no explicit legend values are provided
+    if (numClusters_ == 0) {
+      // if data is not labeled use equidistant bins between min and max val.
+      // This could be either in linear or log space.
+      // If the range of values is large, round to next integer
+      const double range = maxVal - minVal;
+      bool round_it = !useLogFrequency_ && (range / (legendBins_ - 1)) > 2.0;
+      for (size_t i = 0; i < legendBins_; i++) {
+        const double raw_v = minVal + (static_cast<float>(i) / (legendBins_ - 1)) * range;
+        const double v = round_it ? std::round(raw_v) : raw_v;
+        values.push_back(v);
+        text->push_back(format_freq(useLogFrequency_ ? LogTF::inv(v) : v));
+      }
+    } else {
+      // data is labeled (clustered). In this case the value is actually the
+      // cluster label, i.e. an integer ranged 0 ... num_clusters - 1
+      for (size_t i = 0; i < centers.size(); i++) {
+        values.push_back(i);
+        const double v = useLogFrequency_ ? LogTF::inv(centers[i]) : centers[i];
+        text->push_back(format_freq(v));
+      }
+    }
+  } else {
+    // legend values are explicitly given
+    for (const auto & lv : legendValues_) {
+      values.push_back(useLogFrequency_ ? LogTF::tf(lv) : lv);
+      text->push_back(format_freq(lv));
+    }
+  }
+  return (values);
 }
 
 cv::Mat FrequencyCam::addLegend(
@@ -412,43 +481,31 @@ cv::Mat FrequencyCam::addLegend(
   cv::Mat window(img.rows, img.cols + legendWidth_, img.type());
   // copy image into larger window
   img.copyTo(window(cv::Rect(0, 0, img.cols, img.rows)));
-  const size_t numBins = centers.size() != 0 ? (centers.size() + 1) : 10;
-  // valueMat has the original values
-  cv::Mat valueMat(numBins, 1, CV_32FC1);
-  std::vector<std::string> text(numBins);
-  if (centers.empty()) {  // if data is not labeled
-    for (size_t i = 0; i < numBins; i++) {
-      valueMat.at<float>(i, 0) = minVal + (static_cast<float>(i) / numBins) * range;
-      const double rawValue = valueMat.at<float>(i, 0);
-      text[i] = format_freq(useLogFrequency_ ? LogTF::inv(rawValue) : rawValue);
+  // create labels and generate values
+  std::vector<std::string> text;
+  std::vector<float> values = findLegendValuesAndText(minVal, maxVal, centers, &text);
+  if (!values.empty()) {
+    cv::Mat valueMat(values.size(), 1, CV_32FC1);
+    for (size_t i = 0; i < values.size(); i++) {
+      valueMat.at<float>(i, 0) = values[i];
     }
-  } else {  // if data is labeled
-    valueMat.at<float>(0, 0) = 0;
-    text[0] = "n/a";
-    for (size_t i = 0; i < centers.size(); i++) {
-      valueMat.at<float>(i + 1, 0) = i + 1;
-      const double value = useLogFrequency_ ? LogTF::inv(centers[i]) : centers[i];
-      text[i + 1] = format_freq(value);
+    // rescale values matrix the same way as original image
+    cv::Mat scaledValueMat;
+    cv::convertScaleAbs(valueMat, scaledValueMat, 255.0 / range, -minVal * 255.0 / range);
+    cv::Mat colorCode;
+    cv::applyColorMap(scaledValueMat, colorCode, colorMap_);
+    // draw filled rectangles and text labels
+    const int height = img.rows / values.size();  // integer division
+    for (size_t i = 0; i < values.size(); i++) {
+      const int y_off = static_cast<float>(i) / values.size() * img.rows;
+      draw_labeled_rectangle(
+        &window, img.cols, y_off, height, text[i], colorCode.at<cv::Vec3b>(i, 0));
     }
+  } else {
+    // for some reason or the other (usually clustering failed), no legend could be drawn
+    cv::Mat roiLegend = window(cv::Rect(img.cols, 0, legendWidth_, img.rows));
+    roiLegend.setTo(CV_RGB(0, 0, 0));
   }
-  // rescale values
-  cv::Mat scaledValueMat;
-  cv::convertScaleAbs(valueMat, scaledValueMat, 255.0 / range, -minVal * 255.0 / range);
-  cv::Mat colorCode;
-  cv::applyColorMap(scaledValueMat, colorCode, colorMap_);
-  // draw filled rectangles and text labels
-  const cv::Scalar textColor = CV_RGB(0, 0, 0);
-  for (size_t i = 0; i < numBins; i++) {
-    const int y_off = static_cast<float>(i) / numBins * img.rows;
-    const int height = img.rows / numBins;                    // integer division
-    const cv::Point tl(img.cols, y_off);                      // top left
-    const cv::Point br(window.cols - 1, y_off + height - 1);  // bottom right
-    cv::rectangle(window, tl, br, colorCode.at<cv::Vec3b>(i, 0), -1 /* filled */, cv::LINE_8);
-    const cv::Point tp(img.cols - 2, y_off + height / 2 - 2);
-    cv::putText(window, text[i], tp, cv::FONT_HERSHEY_PLAIN, 1.0, textColor, 1.0 /*thickness*/);
-    //window, text[i], tp, cv::FONT_HERSHEY_PLAIN, 1.0, textColor, 1.0 /*thickness*/, cv::LINE_AA);
-  }
-
   return (window);
 }
 
@@ -488,10 +545,10 @@ void FrequencyCam::publishImage()
     } else {
       cv::Mat labeled = label_image(rawImg, minVal, maxVal, numClusters_, &centers);
       minVal = 0;
-      maxVal = numClusters_;  // labels range from 0 (invalid) to numClusters_ (incl)
+      maxVal = numClusters_ - 1;
       const double range = maxVal - minVal;
       cv::convertScaleAbs(labeled, scaled, 255.0 / range, -minVal * 255.0 / range);
-      if (!centers.empty()) {
+      if (!centers.empty() && printClusterCenters_) {
         // print out cluster centers to console
         std::stringstream ss;
         for (const auto & c : centers) {
@@ -502,9 +559,11 @@ void FrequencyCam::publishImage()
     }
     cv::Mat colorImg;
     cv::applyColorMap(scaled, colorImg, colorMap_);
+    colorImg.setTo(CV_RGB(0, 0, 0), rawImg == 0);  // render invalid points black
     if (overlayEvents_) {
       const cv::Scalar eventColor = CV_RGB(127, 127, 127);
-      colorImg.setTo(eventColor, (scaled == 0) & eventImg);
+      // only show events where no frequency is detected
+      colorImg.setTo(eventColor, (rawImg == 0) & eventImg);
     }
     cv::Mat imgWithLegend = addLegend(colorImg, minVal, maxVal, centers);
     imagePub_.publish(cv_bridge::CvImage(header_, "bgr8", imgWithLegend).toImageMsg());

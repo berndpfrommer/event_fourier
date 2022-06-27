@@ -469,19 +469,12 @@ std::vector<float> FrequencyCam::findLegendValuesAndText(
   return (values);
 }
 
-cv::Mat FrequencyCam::addLegend(
-  const cv::Mat & img, const double minVal, const double maxVal,
+void FrequencyCam::addLegend(
+  cv::Mat * window, const double minVal, const double maxVal,
   const std::vector<float> & centers) const
 {
-  if (legendWidth_ == 0) {
-    return (img);
-  }
+  const int x_off = window->cols - legendWidth_;  // left border of legend
   const double range = maxVal - minVal;
-  // the window has legend on the right side
-  cv::Mat window(img.rows, img.cols + legendWidth_, img.type());
-  // copy image into larger window
-  img.copyTo(window(cv::Rect(0, 0, img.cols, img.rows)));
-  // create labels and generate values
   std::vector<std::string> text;
   std::vector<float> values = findLegendValuesAndText(minVal, maxVal, centers, &text);
   if (!values.empty()) {
@@ -495,18 +488,16 @@ cv::Mat FrequencyCam::addLegend(
     cv::Mat colorCode;
     cv::applyColorMap(scaledValueMat, colorCode, colorMap_);
     // draw filled rectangles and text labels
-    const int height = img.rows / values.size();  // integer division
+    const int height = window->rows / values.size();  // integer division
     for (size_t i = 0; i < values.size(); i++) {
-      const int y_off = static_cast<float>(i) / values.size() * img.rows;
-      draw_labeled_rectangle(
-        &window, img.cols, y_off, height, text[i], colorCode.at<cv::Vec3b>(i, 0));
+      const int y_off = static_cast<float>(i) / values.size() * window->rows;
+      draw_labeled_rectangle(window, x_off, y_off, height, text[i], colorCode.at<cv::Vec3b>(i, 0));
     }
   } else {
     // for some reason or the other (usually clustering failed), no legend could be drawn
-    cv::Mat roiLegend = window(cv::Rect(img.cols, 0, legendWidth_, img.rows));
+    cv::Mat roiLegend = (*window)(cv::Rect(x_off, 0, legendWidth_, window->rows));
     roiLegend.setTo(CV_RGB(0, 0, 0));
   }
-  return (window);
 }
 
 cv::Mat FrequencyCam::makeFrequencyAndEventImage(cv::Mat * eventImage)
@@ -557,7 +548,8 @@ void FrequencyCam::publishImage()
         RCLCPP_INFO(get_logger(), ss.str().c_str());
       }
     }
-    cv::Mat colorImg;
+    cv::Mat window(scaled.rows, scaled.cols + legendWidth_, CV_8UC3);
+    cv::Mat colorImg = window(cv::Rect(0, 0, scaled.cols, scaled.rows));
     cv::applyColorMap(scaled, colorImg, colorMap_);
     colorImg.setTo(CV_RGB(0, 0, 0), rawImg == 0);  // render invalid points black
     if (overlayEvents_) {
@@ -565,8 +557,10 @@ void FrequencyCam::publishImage()
       // only show events where no frequency is detected
       colorImg.setTo(eventColor, (rawImg == 0) & eventImg);
     }
-    cv::Mat imgWithLegend = addLegend(colorImg, minVal, maxVal, centers);
-    imagePub_.publish(cv_bridge::CvImage(header_, "bgr8", imgWithLegend).toImageMsg());
+    if (legendWidth_ > 0) {
+      addLegend(&window, minVal, maxVal, centers);
+    }
+    imagePub_.publish(cv_bridge::CvImage(header_, "bgr8", window).toImageMsg());
   }
 }
 

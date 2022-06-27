@@ -103,8 +103,8 @@ private:
     const double minVal, const double maxVal, const std::vector<float> & centers,
     std::vector<std::string> * text) const;
 
-  cv::Mat addLegend(
-    const cv::Mat & img, const double minVal, const double maxVal,
+  void addLegend(
+    cv::Mat * img, const double minVal, const double maxVal,
     const std::vector<float> & centers) const;
   void publishImage();
   void statistics();

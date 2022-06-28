@@ -333,7 +333,7 @@ static void get_valid_pixels(
   }
 }
 
-// sorting with indexfrom stackoverflow:
+// sorting with index from stackoverflow:
 // https://stackoverflow.com/questions/1577475/c-sorting-and-keeping-track-of-indexes
 template <typename T>
 std::vector<size_t> sort_indexes(

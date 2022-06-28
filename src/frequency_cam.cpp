@@ -88,7 +88,7 @@ bool FrequencyCam::initialize()
   auto qos = rclcpp::QoS(rclcpp::KeepLast(EVENT_QUEUE_DEPTH)).best_effort().durability_volatile();
   useSensorTime_ = this->declare_parameter<bool>("use_sensor_time", true);
   const std::string bag = this->declare_parameter<std::string>("bag_file", "");
-  freq_[0] = this->declare_parameter<double>("min_frequency", 0.0);
+  freq_[0] = this->declare_parameter<double>("min_frequency", 1.0);
   freq_[0] = std::max(freq_[0], 0.1);
   freq_[1] = this->declare_parameter<double>("max_frequency", -1.0);
   RCLCPP_INFO_STREAM(get_logger(), "minimum frequency: " << freq_[0]);

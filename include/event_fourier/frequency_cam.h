@@ -44,15 +44,33 @@ private:
   typedef float variable_t;
   struct PackedVar
   {
+    //  7  65  43  210
+    //  p   a   i    s
+    //  o   v   d    k
+    //  l   g   x    i
+    //               p
+
+    // polarity of previous event (filtering)
     void setPolarity(bool p) { packed = (packed & 0x7F) | (p << 7); }
+    inline bool p() const { return (static_cast<bool>(packed & 0x80)); }
+
+    // index into previous events (noise filtering)
+    void setIdx(uint8_t i) { packed = (packed & ~0x18) | (i << 3); }
+    inline uint8_t idx() const { return ((packed >> 3) & 0x3); }
+
+    // skipping event (noise filtering)
     void startSkip() { packed = (packed & ~0x7) | 0x4; }
     void decSkip() { packed = (packed & ~0x7) | ((packed & 0x7) - 1); }
-    inline bool p() const { return (static_cast<bool>(packed & 0x80)); }
-    inline uint8_t idx() const { return ((packed >> 3) & 0x3); }
-    void setIdx(uint8_t i) { packed = (packed & ~0x18) | (i << 3); }
     inline uint8_t skip() const { return (packed & 0x7); }
+
+    // for counting down #of events in average
+    void resetBadDataCount() { packed = (packed & ~0x60); }
+    void incBadDataCount() { packed = (packed & ~0x60) | ((((packed >> 5) & 0x3) + 1) << 5); }
+    inline bool badDataCountLimitReached() const { return (((packed >> 5) & 0x3) == 3); }
+    uint8_t getBadDataCount() const { return ((packed >> 5) & 0x3); }
     uint8_t packed{0};
   };
+
   struct TimeAndPolarity  // keep time and polarity in one 32 bit variable
   {
     void set(uint32_t t_usec, bool p) { t_and_p = (t_usec & 0x7FFFFFFF) | (p << 31); }
@@ -193,12 +211,14 @@ private:
   int64_t lastSeq_{0};
   int64_t droppedSeq_{0};
   std_msgs::msg::Header header_;
-  // ---------- coefficients for state update
+  // ---------- variables for state update
   variable_t c_[2];
   variable_t c_p_{0};
   variable_t dtMix_{1.0 / 100.0};
   variable_t dtDecay_{1 - dtMix_};
   variable_t resetThreshold_{5};
+  variable_t dtMin_{0};
+  variable_t dtMax_{1.0};
   // ---------- dark noise filtering
   uint32_t noiseFilterDtPass_{0};
   uint32_t noiseFilterDtDead_{0};

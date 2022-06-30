@@ -110,6 +110,11 @@ bool FrequencyCam::initialize()
     this->declare_parameter<std::vector<double>>("legend_frequencies", std::vector<double>());
   if (legendValues_.empty()) {
     legendBins_ = this->declare_parameter<int>("legend_bins", 11);
+  } else {
+    if (numClusters_ > 0) {
+      RCLCPP_WARN(get_logger(), "ignoring legend_frequencies when clustering!");
+      legendValues_.clear();
+    }
   }
   overlayEvents_ = this->declare_parameter<bool>("overlay_events", false);
   dtMix_ = static_cast<float>(this->declare_parameter<double>("dt_averaging_alpha", 0.1));
@@ -569,6 +574,7 @@ void FrequencyCam::publishImage()
     if (legendWidth_ > 0) {
       addLegend(&window, minVal, maxVal, centers);
     }
+    header_.stamp = lastTime_;
     imagePub_.publish(cv_bridge::CvImage(header_, "bgr8", window).toImageMsg());
   }
 }

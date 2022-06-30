@@ -269,28 +269,37 @@ void FrequencyCam::updateState(State * state, const Event & e)
   // run the filter (see paper)
   const auto x_k = c_[0] * s.x[0] + c_[1] * s.x[1] + c_p_ * dp;
 
-  if (x_k > 0 && s.x[0] <= 0) {
+  if (((s.dt_avg > 0) && (x_k > 0 && s.x[0] <= 0)) || (s.dt_avg <= 0 && dp > 1e-6)) {
+    //if (dp > 1e-6) {
     // measure period upon transition from lower to upper half, i.e.
     // when ON events happen. This is more precise than on the other flank
     const float dt = (e.t - s.t_flip) * 1e-6;
+#define AVERAGING
+#ifdef AVERAGING
     //
-    if (s.dt_avg < 0) {  // initialization phase
-      // restart the averaging process
-      s.dt_avg = std::max(std::min(dt, dtMax_), dtMin_);
-      s.p_skip_idx.resetBadDataCount();
+    if (s.dt_avg <= 0) {   // initialization phase
+      if (s.dt_avg < 0) {  // initialization phase
+        s.dt_avg += 1.0;
+      } else {
+        // restart the averaging process
+        s.dt_avg = std::max(std::min(dt, dtMax_), dtMin_);
+        s.p_skip_idx.resetBadDataCount();
 #ifdef DEBUG
-      if (e.x == debugX_ && e.y == debugY_) {
-        std::cout << "starting avg dt: " << dt << " init avg: " << s.dt_avg << std::endl;
-      }
+        if (e.x == debugX_ && e.y == debugY_) {
+          std::cout << e.t << " starting avg dt: " << dt << " init avg: " << s.dt_avg << std::endl;
+        }
 #endif
+      }
     } else {
       // not restarting
       if (abs(dt - s.dt_avg) > s.dt_avg * resetThreshold_) {
-        // too far away from avg, ignore it
+        // too far away from avg, ignore this dt
         if (s.p_skip_idx.badDataCountLimitReached() || dt * resetThreshold_ > dtMin_) {
           // gotten too many bad dts or this pixel has not seen an update
           // in a very long time. Reset the average
           s.dt_avg = -1.0;  // signal that on next step dt can be computed
+          s.x[0] = 0;
+          s.x[1] = 0;
         } else {
           s.p_skip_idx.incBadDataCount();
         }
@@ -300,13 +309,16 @@ void FrequencyCam::updateState(State * state, const Event & e)
         s.p_skip_idx.resetBadDataCount();
       }
     }
+#else
+    s.dt_avg = dt;
+    s.p_skip_idx.resetBadDataCount();
+#endif
     s.t_flip = e.t;
 #ifdef DEBUG
     if (e.x == debugX_ && e.y == debugY_) {
       debug_flip << std::setprecision(10) << e.t << " " << dt << " " << s.dt_avg << std::endl;
     }
 #endif
-    s.t_flip = e.t;
   }
   s.t = e.t;
   s.p_skip_idx.setPolarity(e.polarity);

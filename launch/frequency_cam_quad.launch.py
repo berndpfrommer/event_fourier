@@ -36,11 +36,12 @@ def launch_setup(context, *args, **kwargs):
         name='frequency_cam',
         parameters=[
             {'use_sensor_time': True,
+             'use_sim_time': True,   # attention!
              'frame_id': '',
              'min_frequency': 200.0,
              'max_frequency': 300.0,
-             'dt_averaging_alpha': 0.5,  # weight of new period measurement
-             'prefilter_event_cutoff': 10.0, # prefilter cutoff period #events
+             'dt_averaging_alpha': 0.2,  # weight of new period measurement
+             'prefilter_event_cutoff': 5.0, # prefilter cutoff period #events
              'reset_threshold': 0.15,
              'debug_x': 319,
              'debug_y': 239,
@@ -49,7 +50,7 @@ def launch_setup(context, *args, **kwargs):
              'overlay_events': True,
              'worker_threads': 0,
              'bag_file': LaunchConfig('bag_file').perform(context),
-             'slice_time': 0.03}],
+             'publishing_frequency': 25.0}],
         remappings=[
             ('~/events', event_topic),
             ('~/image', image_topic)

@@ -19,7 +19,7 @@
 #include <event_array_msgs/decode.h>
 #include <math.h>
 
-#include <algorithm>  // std::sort, std::stable_sort
+#include <algorithm>  // std::sort, std::stable_sort, std::clamp
 #include <fstream>
 #include <image_transport/image_transport.hpp>
 #include <numeric>  // std::iota
@@ -33,6 +33,9 @@
 
 //#define DEBUG
 //#define PRINT_IMAGE_HISTOGRAM
+
+//#define NAIVE
+#define AVERAGING
 
 #ifdef DEBUG
 std::ofstream debug("freq.txt");
@@ -92,7 +95,6 @@ bool FrequencyCam::initialize()
   freq_[1] = this->declare_parameter<double>("max_frequency", -1.0);
   dtMax_ = 1.0 / freq_[0];
   dtMin_ = 1.0 / (freq_[1] >= freq_[0] ? freq_[1] : 1.0);
-  std::cout << "dtmin: " << dtMin_ << " dtmax: " << dtMax_ << std::endl;
   RCLCPP_INFO_STREAM(get_logger(), "minimum frequency: " << freq_[0]);
   RCLCPP_INFO_STREAM(get_logger(), "maximum frequency: " << freq_[1]);
   useLogFrequency_ = this->declare_parameter<bool>("use_log_frequency", false);
@@ -117,7 +119,8 @@ bool FrequencyCam::initialize()
     }
   }
   overlayEvents_ = this->declare_parameter<bool>("overlay_events", false);
-  dtMix_ = static_cast<float>(this->declare_parameter<double>("dt_averaging_alpha", 0.1));
+  dtMix_ = std::clamp(static_cast<float>(this->declare_parameter<double>("dt_averaging_alpha", 0.1)),
+                      0.001f, 1.000f);
   dtDecay_ = 1.0 - dtMix_;
   const double T_prefilter =
     std::max(1.0, this->declare_parameter<double>("prefilter_event_cutoff", 40));
@@ -131,6 +134,8 @@ bool FrequencyCam::initialize()
   noiseFilterDtPass_ = static_cast<uint32_t>(std::abs(dt_pass) * 1e6);
   noiseFilterDtDead_ = static_cast<uint32_t>(std::abs(dt_dead) * 1e6);
   resetThreshold_ = this->declare_parameter<double>("reset_threshold", 0.2);
+  numGoodCyclesRequired_ = static_cast<uint8_t>(this->declare_parameter<int>(
+    "num_good_cycles_required", std::clamp((int)(1.0 / dtMix_), 0, 254)));
 #ifdef DEBUG
   debugX_ = static_cast<uint16_t>(this->declare_parameter<int>("debug_x", 320));
   debugY_ = static_cast<uint16_t>(this->declare_parameter<int>("debug_y", 240));
@@ -235,10 +240,14 @@ void FrequencyCam::initializeState(uint32_t width, uint32_t height, uint32_t t)
   state_ = new State[width * height];
   for (size_t i = 0; i < width * height; i++) {
     State & s = state_[i];
-    s.t = t;
     s.t_flip = t;
     s.x[0] = 0;
     s.x[1] = 0;
+#if defined(NAIVE) || !defined(AVERAGING)
+    s.avg_cnt = 0;
+#else    
+    s.avg_cnt = numGoodCyclesRequired_;
+#endif    
     s.dt_avg = -1;
     s.p_skip_idx = PackedVar();
     s.p_skip_idx.resetBadDataCount();
@@ -246,11 +255,6 @@ void FrequencyCam::initializeState(uint32_t width, uint32_t height, uint32_t t)
     for (size_t j = 0; j < 4; j++) {
       s.tp[j].set(t, false);
     }
-#ifdef DEBUG
-    if (i % width == debugX_ && i / width == debugY_) {
-      std::cout << "initializing: " << s.t << " " << s.t_flip << std::endl;
-    }
-#endif
   }
   ixStart_ = std::max(0u, roi_[0]);
   iyStart_ = std::max(0u, roi_[1]);
@@ -269,37 +273,51 @@ void FrequencyCam::updateState(State * state, const Event & e)
   // run the filter (see paper)
   const auto x_k = c_[0] * s.x[0] + c_[1] * s.x[1] + c_p_ * dp;
 
-  if (((s.dt_avg > 0) && (x_k > 0 && s.x[0] <= 0)) || (s.dt_avg <= 0 && dp > 1e-6)) {
-    //if (dp > 1e-6) {
+#ifdef NAIVE
+  if (dp > 1e-6) {
+#else    
+  if (((!s.avg_cnt) && (x_k > 0 && s.x[0] <= 0)) || (s.avg_cnt && dp > 1e-6)) {
+#endif
     // measure period upon transition from lower to upper half, i.e.
     // when ON events happen. This is more precise than on the other flank
     const float dt = (e.t - s.t_flip) * 1e-6;
-#define AVERAGING
 #ifdef AVERAGING
-    //
-    if (s.dt_avg <= 0) {   // initialization phase
-      if (s.dt_avg < 0) {  // initialization phase
-        s.dt_avg += 1.0;
+    if (s.avg_cnt) {
+      // in restart phase
+      if (abs(dt - s.dt_avg) > s.dt_avg * resetThreshold_) {
+        // dt is not consistent with current average,
+        // throw up hands and reset again
+        s.avg_cnt = numGoodCyclesRequired_;
+        s.dt_avg = std::clamp(dt, dtMin_, dtMax_);
       } else {
-        // restart the averaging process
-        s.dt_avg = std::max(std::min(dt, dtMax_), dtMin_);
-        s.p_skip_idx.resetBadDataCount();
-#ifdef DEBUG
-        if (e.x == debugX_ && e.y == debugY_) {
-          std::cout << e.t << " starting avg dt: " << dt << " init avg: " << s.dt_avg << std::endl;
-        }
-#endif
+        s.dt_avg = s.dt_avg * dtDecay_ + dtMix_ * dt;
+        s.avg_cnt--;
       }
+      // either way reset the bad data count
+      s.p_skip_idx.resetBadDataCount();
+#ifdef DEBUG
+      if (e.x == debugX_ && e.y == debugY_) {
+        std::cout << e.t << "   in restart phase(" << (int) s.avg_cnt <<
+          ") dt: " << dt << " init avg: " << s.dt_avg << std::endl;
+      }
+#endif
     } else {
-      // not restarting
+      // not in restart phase
       if (abs(dt - s.dt_avg) > s.dt_avg * resetThreshold_) {
         // too far away from avg, ignore this dt
-        if (s.p_skip_idx.badDataCountLimitReached() || dt * resetThreshold_ > dtMin_) {
+        if (s.p_skip_idx.badDataCountLimitReached() || dt * resetThreshold_ > dtMax_) {
           // gotten too many bad dts or this pixel has not seen an update
           // in a very long time. Reset the average
-          s.dt_avg = -1.0;  // signal that on next step dt can be computed
+          s.dt_avg = std::clamp(dt, dtMin_, dtMax_);
+          s.avg_cnt = numGoodCyclesRequired_;
           s.x[0] = 0;
           s.x[1] = 0;
+#ifdef DEBUG
+          if (e.x == debugX_ && e.y == debugY_) {
+            std::cout << e.t << " starting restart phase(" << (int) s.avg_cnt <<
+              ") dt: " << dt << " init avg: " << s.dt_avg << std::endl;
+          }
+#endif
         } else {
           s.p_skip_idx.incBadDataCount();
         }
@@ -307,6 +325,9 @@ void FrequencyCam::updateState(State * state, const Event & e)
         // all well, compound into average
         s.dt_avg = s.dt_avg * dtDecay_ + dtMix_ * dt;
         s.p_skip_idx.resetBadDataCount();
+        if (s.avg_cnt != 0) {
+          s.avg_cnt--;
+        }
       }
     }
 #else
@@ -316,11 +337,11 @@ void FrequencyCam::updateState(State * state, const Event & e)
     s.t_flip = e.t;
 #ifdef DEBUG
     if (e.x == debugX_ && e.y == debugY_) {
-      debug_flip << std::setprecision(10) << e.t << " " << dt << " " << s.dt_avg << std::endl;
+      debug_flip << std::setprecision(10) << e.t << " " << dt << " "
+                 << s.dt_avg << " " << (int)s.avg_cnt << std::endl;
     }
 #endif
   }
-  s.t = e.t;
   s.p_skip_idx.setPolarity(e.polarity);
   s.x[1] = s.x[0];
   s.x[0] = x_k;
@@ -329,7 +350,7 @@ void FrequencyCam::updateState(State * state, const Event & e)
     const double dt = (e.t - s.t_flip) * 1e-6;
     const double f = s.dt_avg < 1e-6f ? 0 : (1.0 / s.dt_avg);
     debug << e.t << " " << x_k << " " << dt << " " << s.dt_avg << " " << f << " " << dp << " "
-          << (int)s.p_skip_idx.getBadDataCount() << std::endl;
+          << (int)s.p_skip_idx.getBadDataCount() << " " << (int) s.avg_cnt << std::endl;
   }
 #endif
 }

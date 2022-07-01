@@ -67,6 +67,7 @@ private:
     void resetBadDataCount() { packed = (packed & ~0x60); }
     void incBadDataCount() { packed = (packed & ~0x60) | ((((packed >> 5) & 0x3) + 1) << 5); }
     inline bool badDataCountLimitReached() const { return (((packed >> 5) & 0x3) == 3); }
+    inline bool hasBadData() const { return (((packed >> 5) & 0x3) != 0); }
     uint8_t getBadDataCount() const { return ((packed >> 5) & 0x3); }
     uint8_t packed{0};
   };
@@ -102,13 +103,13 @@ private:
     TimeAndPolarity tp[4];  // circular buffer for noise filter
     //
     uint32_t t_flip;    // time of last flip
-    uint32_t t;         // last time stamp
     variable_t x[2];    // current and lagged signal x
     variable_t dt_avg;  // average sample time (time between events)
     // could collapse 6 bytes into 1, reducing
     // total to 32 + 21 = 53 bytes
     // these 4 bytes could be collapsed into 1 bit
     PackedVar p_skip_idx;  // polarity, skip cnt, idx
+    uint8_t avg_cnt{0};    // number of dt til good average
   };
 
   using EventArray = event_array_msgs::msg::EventArray;
@@ -160,17 +161,21 @@ private:
       for (uint32_t ix = ixStart_; ix < ixEnd_; ix++) {
         const size_t offset = iy * width_ + ix;
         const State & state = state_[offset];
-        const double dt = (lastEventTime_ - state.t) * 1e-6;
-        const double f = 1.0 / std::max(state.dt_avg, 1e-6f);
-        // filter out any pixels that have not been updated
-        // for more than two periods of the minimum allowed
-        // frequency or two periods of the actual estimated
-        // period
-        U::update(eventFrame, ix, iy, dt, eventImageDt_);
-        if (dt < maxDt && dt * f < 2) {
-          rawImg.at<float>(iy, ix) = std::max(T::tf(f), minFreq);
-        } else {
-          rawImg.at<float>(iy, ix) = 0;  // mark as invalid
+        // state.avg_cnt is zero when enough updates
+        // have been compounded into the average
+        if (!state.avg_cnt) {
+            const double dt = (lastEventTime_ - state.t_flip) * 1e-6;
+            const double f = 1.0 / std::max(state.dt_avg, 1e-6f);
+            // filter out any pixels that have not been updated
+            // for more than two periods of the minimum allowed
+            // frequency or two periods of the actual estimated
+            // period
+            U::update(eventFrame, ix, iy, dt, eventImageDt_);
+            if (dt < maxDt && dt * f < 2) {
+              rawImg.at<float>(iy, ix) = std::max(T::tf(f), minFreq);
+            } else {
+              rawImg.at<float>(iy, ix) = 0;  // mark as invalid
+            }
         }
       }
     }
@@ -219,6 +224,7 @@ private:
   variable_t resetThreshold_{5};
   variable_t dtMin_{0};
   variable_t dtMax_{1.0};
+  uint8_t numGoodCyclesRequired_{3};
   // ---------- dark noise filtering
   uint32_t noiseFilterDtPass_{0};
   uint32_t noiseFilterDtDead_{0};

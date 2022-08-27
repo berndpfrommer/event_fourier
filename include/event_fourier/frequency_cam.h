@@ -114,7 +114,7 @@ private:
 
   using EventArray = event_array_msgs::msg::EventArray;
   using EventArrayConstPtr = EventArray::ConstSharedPtr;
-  void readEventsFromBag(const std::string & bagName);
+  void playEventsFromBag(const std::string & bagName);
   bool initialize();
   void initializeState(uint32_t width, uint32_t height, uint32_t t);
   void callbackEvents(EventArrayConstPtr msg);
@@ -125,6 +125,7 @@ private:
   void addLegend(
     cv::Mat * img, const double minVal, const double maxVal,
     const std::vector<float> & centers) const;
+  cv::Mat makeImage() const;
   void publishImage();
   void statistics();
   void updateState(State * state, const Event & e);
@@ -164,25 +165,25 @@ private:
         // state.avg_cnt is zero when enough updates
         // have been compounded into the average
         if (!state.avg_cnt) {
-            const double dt = (lastEventTime_ - state.t_flip) * 1e-6;
-            const double f = 1.0 / std::max(state.dt_avg, 1e-6f);
-            // filter out any pixels that have not been updated
-            // for more than two periods of the minimum allowed
-            // frequency or two periods of the actual estimated
-            // period
-            U::update(eventFrame, ix, iy, dt, eventImageDt_);
-            if (dt < maxDt && dt * f < 2) {
-              rawImg.at<float>(iy, ix) = std::max(T::tf(f), minFreq);
-            } else {
-              rawImg.at<float>(iy, ix) = 0;  // mark as invalid
-            }
+          const double dt = (lastEventTime_ - state.t_flip) * 1e-6;
+          const double f = 1.0 / std::max(state.dt_avg, 1e-6f);
+          // filter out any pixels that have not been updated
+          // for more than two periods of the minimum allowed
+          // frequency or two periods of the actual estimated
+          // period
+          U::update(eventFrame, ix, iy, dt, eventImageDt_);
+          if (dt < maxDt && dt * f < 2) {
+            rawImg.at<float>(iy, ix) = std::max(T::tf(f), minFreq);
+          } else {
+            rawImg.at<float>(iy, ix) = 0;  // mark as invalid
+          }
         }
       }
     }
     return (rawImg);
   }
 
-  cv::Mat makeFrequencyAndEventImage(cv::Mat * eventImage);
+  cv::Mat makeFrequencyAndEventImage(cv::Mat * eventImage) const;
 
   bool filterNoise(State * state, const Event & newEvent, Event * e_f);
   void startThreads();

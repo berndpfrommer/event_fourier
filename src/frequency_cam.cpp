@@ -18,6 +18,7 @@
 #include <cv_bridge/cv_bridge.h>
 #include <event_array_msgs/decode.h>
 #include <math.h>
+#include <filesystem>
 
 #include <algorithm>  // std::sort, std::stable_sort, std::clamp
 #include <fstream>
@@ -30,6 +31,7 @@
 #include <rosbag2_cpp/readers/sequential_reader.hpp>
 #include <sstream>
 #include <thread>
+#include <opencv2/imgcodecs.hpp>
 
 //#define DEBUG
 //#define PRINT_IMAGE_HISTOGRAM
@@ -119,8 +121,8 @@ bool FrequencyCam::initialize()
     }
   }
   overlayEvents_ = this->declare_parameter<bool>("overlay_events", false);
-  dtMix_ = std::clamp(static_cast<float>(this->declare_parameter<double>("dt_averaging_alpha", 0.1)),
-                      0.001f, 1.000f);
+  dtMix_ = std::clamp(
+    static_cast<float>(this->declare_parameter<double>("dt_averaging_alpha", 0.1)), 0.001f, 1.000f);
   dtDecay_ = 1.0 - dtMix_;
   const double T_prefilter =
     std::max(1.0, this->declare_parameter<double>("prefilter_event_cutoff", 40));
@@ -152,18 +154,20 @@ bool FrequencyCam::initialize()
       "using roi: (" << roi_[0] << ", " << roi_[1] << ") w: " << roi_[2] << " h: " << roi_[3]);
   }
   startThreads();
+  eventImageDt_ =
+    1.0 / std::max(this->declare_parameter<double>("publishing_frequency", 20.0), 1.0);
+
   if (bag.empty()) {
     eventSub_ = this->create_subscription<EventArray>(
       "~/events", qos, std::bind(&FrequencyCam::callbackEvents, this, std::placeholders::_1));
-    double T = 1.0 / std::max(this->declare_parameter<double>("publishing_frequency", 20.0), 1.0);
-    eventImageDt_ = T;
     pubTimer_ = rclcpp::create_timer(
-      this, this->get_clock(), rclcpp::Duration::from_seconds(T), [=]() { this->publishImage(); });
+      this, this->get_clock(), rclcpp::Duration::from_seconds(eventImageDt_),
+      [=]() { this->publishImage(); });
     statsTimer_ = rclcpp::create_timer(
       this, this->get_clock(), rclcpp::Duration::from_seconds(2.0), [=]() { this->statistics(); });
   } else {
     // reading from bag is only for debugging...
-    readEventsFromBag(bag);
+    playEventsFromBag(bag);
   }
   return (true);
 }
@@ -213,19 +217,45 @@ void FrequencyCam::worker(unsigned int id)
   }
 }
 
-void FrequencyCam::readEventsFromBag(const std::string & bagName)
+void FrequencyCam::playEventsFromBag(const std::string & bagName)
 {
-  rclcpp::Time t0;
+  rclcpp::Time lastFrameTime(0);
   rosbag2_cpp::Reader reader;
   reader.open(bagName);
   rclcpp::Serialization<event_array_msgs::msg::EventArray> serialization;
+  const auto delta_t = rclcpp::Duration::from_seconds(eventImageDt_);
+  bool hasValidTime = false;
+  uint32_t frameCount(0);
+  const std::string path = this->declare_parameter<std::string>("path", "./frames");
+  std::filesystem::create_directories(path);
+  std::ofstream timestamps("time_stamps.txt");
   while (reader.has_next()) {
     auto bagmsg = reader.read_next();
-    // if (bagmsg->topic_name == topic)
     rclcpp::SerializedMessage serializedMsg(*bagmsg->serialized_data);
     EventArray::SharedPtr msg(new EventArray());
     serialization.deserialize_message(&serializedMsg, &(*msg));
-    callbackEvents(msg);
+    if (msg) {
+      const rclcpp::Time t(msg->header.stamp);
+      callbackEvents(msg);
+      std::cout << msg->time_base / 1000 << std::endl;
+      if (hasValidTime) {
+        if (t - lastFrameTime > delta_t) {
+          const cv::Mat img = makeImage();
+          lastFrameTime = t;
+          char fname[256];
+          snprintf(fname, sizeof(fname) - 1, "/frame_%05u.jpg", frameCount);
+          std::cout << "writing: " << (path + fname) << std::endl;
+          cv::imwrite(path + fname, img);
+          timestamps << msg->time_base << " " << frameCount << std::endl;
+          frameCount++;
+        }
+      } else {
+        hasValidTime = true;
+        lastFrameTime = t;
+      }
+    } else {
+      RCLCPP_WARN(get_logger(), "skipped invalid message type in bag!");
+    }
   }
   RCLCPP_INFO(get_logger(), "finished playing bag");
 }
@@ -547,7 +577,7 @@ void FrequencyCam::addLegend(
   }
 }
 
-cv::Mat FrequencyCam::makeFrequencyAndEventImage(cv::Mat * eventImage)
+cv::Mat FrequencyCam::makeFrequencyAndEventImage(cv::Mat * eventImage) const
 {
   if (overlayEvents_) {
     *eventImage = cv::Mat::zeros(height_, width_, CV_8UC1);
@@ -562,51 +592,57 @@ cv::Mat FrequencyCam::makeFrequencyAndEventImage(cv::Mat * eventImage)
                    : makeTransformedFrequencyImage<NoTF, NoEventFrameUpdater>(eventImage));
 }
 
+cv::Mat FrequencyCam::makeImage() const
+{
+  cv::Mat eventImg;
+  cv::Mat rawImg = makeFrequencyAndEventImage(&eventImg);
+  cv::Mat scaled;
+  double minVal = tfFreq_[0];
+  double maxVal = tfFreq_[1];
+  std::vector<float> centers;
+  if (numClusters_ == 0) {
+    if (freq_[1] < 0) {
+      compute_max(rawImg, &maxVal);
+    }
+#ifdef PRINT_IMAGE_HISTOGRAM
+    print_image_histogram(rawImg, 10, minVal, maxVal);
+#endif
+    const double range = maxVal - minVal;
+    cv::convertScaleAbs(rawImg, scaled, 255.0 / range, -minVal * 255.0 / range);
+  } else {
+    cv::Mat labeled = label_image(rawImg, minVal, maxVal, numClusters_, &centers);
+    minVal = 0;
+    maxVal = numClusters_ - 1;
+    const double range = maxVal - minVal;
+    cv::convertScaleAbs(labeled, scaled, 255.0 / range, -minVal * 255.0 / range);
+    if (!centers.empty() && printClusterCenters_) {
+      // print out cluster centers to console
+      std::stringstream ss;
+      for (const auto & c : centers) {
+        ss << " " << std::fixed << std::setw(10) << std::setprecision(6) << c;
+      }
+      RCLCPP_INFO(get_logger(), ss.str().c_str());
+    }
+  }
+  cv::Mat window(scaled.rows, scaled.cols + legendWidth_, CV_8UC3);
+  cv::Mat colorImg = window(cv::Rect(0, 0, scaled.cols, scaled.rows));
+  cv::applyColorMap(scaled, colorImg, colorMap_);
+  colorImg.setTo(CV_RGB(0, 0, 0), rawImg == 0);  // render invalid points black
+  if (overlayEvents_) {
+    const cv::Scalar eventColor = CV_RGB(127, 127, 127);
+    // only show events where no frequency is detected
+    colorImg.setTo(eventColor, (rawImg == 0) & eventImg);
+  }
+  if (legendWidth_ > 0) {
+    addLegend(&window, minVal, maxVal, centers);
+  }
+  return (window);
+}
+
 void FrequencyCam::publishImage()
 {
   if (imagePub_.getNumSubscribers() != 0 && height_ != 0) {
-    cv::Mat eventImg;
-    cv::Mat rawImg = makeFrequencyAndEventImage(&eventImg);
-    cv::Mat scaled;
-    double minVal = tfFreq_[0];
-    double maxVal = tfFreq_[1];
-    std::vector<float> centers;
-    if (numClusters_ == 0) {
-      if (freq_[1] < 0) {
-        compute_max(rawImg, &maxVal);
-      }
-#ifdef PRINT_IMAGE_HISTOGRAM
-      print_image_histogram(rawImg, 10, minVal, maxVal);
-#endif
-      const double range = maxVal - minVal;
-      cv::convertScaleAbs(rawImg, scaled, 255.0 / range, -minVal * 255.0 / range);
-    } else {
-      cv::Mat labeled = label_image(rawImg, minVal, maxVal, numClusters_, &centers);
-      minVal = 0;
-      maxVal = numClusters_ - 1;
-      const double range = maxVal - minVal;
-      cv::convertScaleAbs(labeled, scaled, 255.0 / range, -minVal * 255.0 / range);
-      if (!centers.empty() && printClusterCenters_) {
-        // print out cluster centers to console
-        std::stringstream ss;
-        for (const auto & c : centers) {
-          ss << " " << std::fixed << std::setw(10) << std::setprecision(6) << c;
-        }
-        RCLCPP_INFO(get_logger(), ss.str().c_str());
-      }
-    }
-    cv::Mat window(scaled.rows, scaled.cols + legendWidth_, CV_8UC3);
-    cv::Mat colorImg = window(cv::Rect(0, 0, scaled.cols, scaled.rows));
-    cv::applyColorMap(scaled, colorImg, colorMap_);
-    colorImg.setTo(CV_RGB(0, 0, 0), rawImg == 0);  // render invalid points black
-    if (overlayEvents_) {
-      const cv::Scalar eventColor = CV_RGB(127, 127, 127);
-      // only show events where no frequency is detected
-      colorImg.setTo(eventColor, (rawImg == 0) & eventImg);
-    }
-    if (legendWidth_ > 0) {
-      addLegend(&window, minVal, maxVal, centers);
-    }
+    const cv::Mat window = makeImage();
     header_.stamp = lastTime_;
     imagePub_.publish(cv_bridge::CvImage(header_, "bgr8", window).toImageMsg());
   }

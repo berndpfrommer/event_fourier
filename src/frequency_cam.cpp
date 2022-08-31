@@ -46,6 +46,9 @@ std::ofstream debug_flip("flip.txt");
 
 namespace event_fourier
 {
+  using EventArray = event_array_msgs::msg::EventArray;
+
+
 FrequencyCam::FrequencyCam(const rclcpp::NodeOptions & options) : Node("frequency_cam", options)
 {
   if (!initialize()) {
@@ -91,6 +94,7 @@ bool FrequencyCam::initialize()
   const size_t EVENT_QUEUE_DEPTH(1000);
   auto qos = rclcpp::QoS(rclcpp::KeepLast(EVENT_QUEUE_DEPTH)).best_effort().durability_volatile();
   useSensorTime_ = this->declare_parameter<bool>("use_sensor_time", true);
+  useTemporalNoiseFilter_ = this->declare_parameter<bool>("use_temporal_noise_filter", false);
   const std::string bag = this->declare_parameter<std::string>("bag_file", "");
   freq_[0] = this->declare_parameter<double>("min_frequency", 1.0);
   freq_[0] = std::max(freq_[0], 0.1);
@@ -166,8 +170,13 @@ bool FrequencyCam::initialize()
     statsTimer_ = rclcpp::create_timer(
       this, this->get_clock(), rclcpp::Duration::from_seconds(2.0), [=]() { this->statistics(); });
   } else {
-    // reading from bag is only for debugging...
-    playEventsFromBag(bag);
+    // reading from bag is only for debugging and comparing to e.g.
+    // metavision SDK analytics modules
+    if (this->declare_parameter<bool>("use_external_frame_times", true)) {
+      playEventsFromBagExtTimeStamps(bag);
+    } else {
+      playEventsFromBag(bag);
+    }
   }
   return (true);
 }
@@ -205,12 +214,7 @@ void FrequencyCam::worker(unsigned int id)
       e.polarity = event_array_msgs::mono::decode_t_x_y_p(p, timeBase, &t, &e.x, &e.y);
       e.t = shorten_time(t);
       if (e.y % threads_.size() == id) {
-        const size_t offset = e.y * width_ + e.x;
-        State & s = state_[offset];
-        Event e_f;  // filtered event, from the past
-        if (filterNoise(&s, e, &e_f)) {
-          updateState(&s, e_f);
-        }
+        filterAndUpdateState(&state_[e.y * width_ + e.x], e);
       }
     }
     b.reader_done();
@@ -222,13 +226,13 @@ void FrequencyCam::playEventsFromBag(const std::string & bagName)
   rclcpp::Time lastFrameTime(0);
   rosbag2_cpp::Reader reader;
   reader.open(bagName);
-  rclcpp::Serialization<event_array_msgs::msg::EventArray> serialization;
+  rclcpp::Serialization<EventArray> serialization;
   const auto delta_t = rclcpp::Duration::from_seconds(eventImageDt_);
   bool hasValidTime = false;
   uint32_t frameCount(0);
   const std::string path = this->declare_parameter<std::string>("path", "./frames");
   std::filesystem::create_directories(path);
-  std::ofstream timestamps("time_stamps.txt");
+
   while (reader.has_next()) {
     auto bagmsg = reader.read_next();
     rclcpp::SerializedMessage serializedMsg(*bagmsg->serialized_data);
@@ -237,21 +241,107 @@ void FrequencyCam::playEventsFromBag(const std::string & bagName)
     if (msg) {
       const rclcpp::Time t(msg->header.stamp);
       callbackEvents(msg);
-      std::cout << msg->time_base / 1000 << std::endl;
       if (hasValidTime) {
         if (t - lastFrameTime > delta_t) {
           const cv::Mat img = makeImage();
           lastFrameTime = t;
           char fname[256];
           snprintf(fname, sizeof(fname) - 1, "/frame_%05u.jpg", frameCount);
-          std::cout << "writing: " << (path + fname) << std::endl;
           cv::imwrite(path + fname, img);
-          timestamps << msg->time_base << " " << frameCount << std::endl;
           frameCount++;
         }
       } else {
         hasValidTime = true;
         lastFrameTime = t;
+      }
+    } else {
+      RCLCPP_WARN(get_logger(), "skipped invalid message type in bag!");
+    }
+  }
+  RCLCPP_INFO(get_logger(), "finished playing bag");
+}
+
+static std::vector<uint64_t> read_ts(const std::string & fname)
+{
+  std::vector<uint64_t> ts;
+  std::ifstream mv_ts(fname);
+  uint64_t t, fnum;
+  while (mv_ts >> t >> fnum) {
+    ts.push_back(t);
+  }
+  return (ts);
+}
+
+void FrequencyCam::playEventsFromBagExtTimeStamps(const std::string & bagName)
+{
+  rclcpp::Time lastFrameTime(0);
+  rosbag2_cpp::Reader reader;
+  reader.open(bagName);
+  rclcpp::Serialization<EventArray> serialization;
+  uint32_t frameCount(0);
+  const std::string path = this->declare_parameter<std::string>("path", "./frames");
+  std::filesystem::create_directories(path);
+  const auto stamps = read_ts("mv_time_stamps.txt");
+  if (stamps.empty()) {
+    RCLCPP_ERROR(get_logger(), "no time stamps found!");
+    return;
+  }
+
+  size_t numEvents = 0;
+  while (reader.has_next() && frameCount < stamps.size()) {
+    auto bagmsg = reader.read_next();
+    rclcpp::SerializedMessage serializedMsg(*bagmsg->serialized_data);
+    EventArray::SharedPtr msg(new EventArray());
+    serialization.deserialize_message(&serializedMsg, &(*msg));
+    if (msg) {
+      EventArray::SharedPtr currMsg(new EventArray(*msg));
+      currMsg->events.clear();
+      const auto timeBase = msg->time_base;
+      const auto & events = msg->events;
+      const uint8_t * p_base = &events[0];
+      const uint8_t * p;
+      for (p = p_base; p < p_base + events.size(); p += event_array_msgs::mono::bytes_per_event) {
+        const uint64_t t = event_array_msgs::mono::decode_t(p, timeBase);
+        while (t > stamps[frameCount] &&
+               frameCount < stamps.size()) {  // crossed a time slot boundary
+          if (currMsg) {                      // process all events before the current one
+            numEvents += currMsg->events.size() / event_array_msgs::mono::bytes_per_event;
+            if (!currMsg->events.empty()) {
+              callbackEvents(currMsg);
+            }
+            currMsg.reset();
+          }
+#ifdef SIMPLE_EVENT_IMAGE
+          eventImageDt_ =
+            (stamps[frameCount] - stamps[std::max(static_cast<int>(frameCount) - 1, 0)]) * 1e-9;
+#endif
+          const cv::Mat img = makeImage();
+          // no max frequency specified, calculate highest frequency
+          char fname[256];
+          snprintf(fname, sizeof(fname) - 1, "/frame_%05u.jpg", frameCount);
+          cv::imwrite(path + fname, img);
+          frameCount++;
+          numEvents = 0;
+        }
+        if (frameCount >= stamps.size()) {
+          RCLCPP_INFO(get_logger(), "reached last time stamp, finished!");
+          break;
+        }
+        if (!currMsg) {
+          currMsg.reset(new EventArray(*msg));
+          currMsg->events.clear();
+        }
+        // copy event into last message
+        for (size_t i = 0; i < event_array_msgs::mono::bytes_per_event; i++) {
+          currMsg->events.push_back(p[i]);
+        }
+      }               // end of while loop over events
+      if (currMsg) {  // deliver unfinished message
+        if (!currMsg->events.empty()) {
+          callbackEvents(currMsg);
+        }
+        numEvents += currMsg->events.size() / event_array_msgs::mono::bytes_per_event;
+        currMsg.reset();
       }
     } else {
       RCLCPP_WARN(get_logger(), "skipped invalid message type in bag!");
@@ -275,10 +365,13 @@ void FrequencyCam::initializeState(uint32_t width, uint32_t height, uint32_t t)
     s.x[1] = 0;
 #if defined(NAIVE) || !defined(AVERAGING)
     s.avg_cnt = 0;
-#else    
+#else
     s.avg_cnt = numGoodCyclesRequired_;
-#endif    
+#endif
     s.dt_avg = -1;
+#ifdef SIMPLE_EVENT_IMAGE
+    s.last_update = 0;
+#endif
     s.p_skip_idx = PackedVar();
     s.p_skip_idx.resetBadDataCount();
     // initialize lagged state
@@ -302,10 +395,12 @@ void FrequencyCam::updateState(State * state, const Event & e)
   const float dp = static_cast<int8_t>(e.polarity) - static_cast<int8_t>(s.p_skip_idx.p());
   // run the filter (see paper)
   const auto x_k = c_[0] * s.x[0] + c_[1] * s.x[1] + c_p_ * dp;
-
+#ifdef SIMPLE_EVENT_IMAGE
+  s.last_update = e.t;
+#endif
 #ifdef NAIVE
   if (dp > 1e-6) {
-#else    
+#else
   if (((!s.avg_cnt) && (x_k > 0 && s.x[0] <= 0)) || (s.avg_cnt && dp > 1e-6)) {
 #endif
     // measure period upon transition from lower to upper half, i.e.
@@ -327,8 +422,8 @@ void FrequencyCam::updateState(State * state, const Event & e)
       s.p_skip_idx.resetBadDataCount();
 #ifdef DEBUG
       if (e.x == debugX_ && e.y == debugY_) {
-        std::cout << e.t << "   in restart phase(" << (int) s.avg_cnt <<
-          ") dt: " << dt << " init avg: " << s.dt_avg << std::endl;
+        std::cout << e.t << "   in restart phase(" << (int)s.avg_cnt << ") dt: " << dt
+                  << " init avg: " << s.dt_avg << std::endl;
       }
 #endif
     } else {
@@ -344,8 +439,8 @@ void FrequencyCam::updateState(State * state, const Event & e)
           s.x[1] = 0;
 #ifdef DEBUG
           if (e.x == debugX_ && e.y == debugY_) {
-            std::cout << e.t << " starting restart phase(" << (int) s.avg_cnt <<
-              ") dt: " << dt << " init avg: " << s.dt_avg << std::endl;
+            std::cout << e.t << " starting restart phase(" << (int)s.avg_cnt << ") dt: " << dt
+                      << " init avg: " << s.dt_avg << std::endl;
           }
 #endif
         } else {
@@ -367,8 +462,8 @@ void FrequencyCam::updateState(State * state, const Event & e)
     s.t_flip = e.t;
 #ifdef DEBUG
     if (e.x == debugX_ && e.y == debugY_) {
-      debug_flip << std::setprecision(10) << e.t << " " << dt << " "
-                 << s.dt_avg << " " << (int)s.avg_cnt << std::endl;
+      debug_flip << std::setprecision(10) << e.t << " " << dt << " " << s.dt_avg << " "
+                 << (int)s.avg_cnt << std::endl;
     }
 #endif
   }
@@ -380,7 +475,7 @@ void FrequencyCam::updateState(State * state, const Event & e)
     const double dt = (e.t - s.t_flip) * 1e-6;
     const double f = s.dt_avg < 1e-6f ? 0 : (1.0 / s.dt_avg);
     debug << e.t << " " << x_k << " " << dt << " " << s.dt_avg << " " << f << " " << dp << " "
-          << (int)s.p_skip_idx.getBadDataCount() << " " << (int) s.avg_cnt << std::endl;
+          << (int)s.p_skip_idx.getBadDataCount() << " " << (int)s.avg_cnt << std::endl;
   }
 #endif
 }
@@ -693,12 +788,7 @@ uint32_t FrequencyCam::updateSingleThreaded(uint64_t timeBase, const std::vector
     e.polarity = event_array_msgs::mono::decode_t_x_y_p(p, timeBase, &t, &e.x, &e.y);
     e.t = shorten_time(t);
     lastEventTime = e.t;
-    const size_t offset = e.y * width_ + e.x;
-    State & s = state_[offset];
-    Event e_f(e);  // filtered event, from the past
-    if (filterNoise(&s, e, &e_f)) {
-      updateState(&s, e_f);
-    }
+    filterAndUpdateState(&state_[e.y * width_ + e.x], e);
   }
   return (lastEventTime);
 }

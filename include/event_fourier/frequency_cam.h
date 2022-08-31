@@ -29,6 +29,14 @@
 #include <thread>
 #include <vector>
 
+// The simple event image was necessary to compare with other data sources such
+// as the metavision SDK's analytics modules. It means that the events drawn are
+// based on a simple frame rather than the more sophisticated criterion of
+// having had an event within the currently estimated frequency period.
+// NOTE: using this option decreases performance substantially!
+
+#define SIMPLE_EVENT_IMAGE
+
 namespace event_fourier
 {
 class FrequencyCam : public rclcpp::Node
@@ -92,6 +100,7 @@ private:
       t = tp.t();
     }
     uint32_t t;
+
     uint16_t x;
     uint16_t y;
     bool polarity;
@@ -110,11 +119,15 @@ private:
     // these 4 bytes could be collapsed into 1 bit
     PackedVar p_skip_idx;  // polarity, skip cnt, idx
     uint8_t avg_cnt{0};    // number of dt til good average
+#ifdef SIMPLE_EVENT_IMAGE
+    uint32_t last_update;  // shortened time of last update
+#endif
   };
 
   using EventArray = event_array_msgs::msg::EventArray;
   using EventArrayConstPtr = EventArray::ConstSharedPtr;
   void playEventsFromBag(const std::string & bagName);
+  void playEventsFromBagExtTimeStamps(const std::string & bagName);
   bool initialize();
   void initializeState(uint32_t width, uint32_t height, uint32_t t);
   void callbackEvents(EventArrayConstPtr msg);
@@ -164,14 +177,20 @@ private:
         const State & state = state_[offset];
         // state.avg_cnt is zero when enough updates
         // have been compounded into the average
+        const double dt = (lastEventTime_ - state.t_flip) * 1e-6;
+#ifdef SIMPLE_EVENT_IMAGE
+        (void)minFreq;  // suppress compiler warning/error
+        const double dtEv = (lastEventTime_ - state.last_update) * 1e-6;
+        U::update(eventFrame, ix, iy, dtEv, eventImageDt_);
+#else
+        U::update(eventFrame, ix, iy, dt, eventImageDt_);
+#endif
         if (!state.avg_cnt) {
-          const double dt = (lastEventTime_ - state.t_flip) * 1e-6;
           const double f = 1.0 / std::max(state.dt_avg, 1e-6f);
           // filter out any pixels that have not been updated
           // for more than two periods of the minimum allowed
           // frequency or two periods of the actual estimated
           // period
-          U::update(eventFrame, ix, iy, dt, eventImageDt_);
           if (dt < maxDt && dt * f < 2) {
             rawImg.at<float>(iy, ix) = std::max(T::tf(f), minFreq);
           } else {
@@ -190,7 +209,17 @@ private:
   void worker(unsigned int id);
   uint32_t updateMultiThreaded(uint64_t timeBase, const std::vector<uint8_t> & events);
   uint32_t updateSingleThreaded(uint64_t timeBase, const std::vector<uint8_t> & events);
-
+  inline void filterAndUpdateState(State * s, const Event & e)
+  {
+    if (useTemporalNoiseFilter_) {
+      Event e_f(e);  // filtered event, from the past
+      if (filterNoise(s, e, &e_f)) {
+        updateState(s, e_f);
+      }
+    } else {
+      updateState(s, e);
+    }
+  }
   // ------ variables ----
   rclcpp::Time lastTime_{0};
   bool useSensorTime_;
@@ -229,6 +258,7 @@ private:
   // ---------- dark noise filtering
   uint32_t noiseFilterDtPass_{0};
   uint32_t noiseFilterDtDead_{0};
+  bool useTemporalNoiseFilter_{false};
   // ---------- multithreading
   std::vector<std::thread> threads_;
   std::atomic<bool> keepRunning_{true};

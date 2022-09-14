@@ -71,16 +71,14 @@ FrequencyCam::~FrequencyCam()
   delete[] state_;
 }
 
-static double compute_alpha_prefilter(const double T_cut)
+  static void compute_alpha_beta(const double T_cut, double *alpha, double *beta)
 {
-  const double omega_c = 2 * M_PI / T_cut;
-  const double y = 2 * std::cos(omega_c);
-  // set up b and c coeffients for quadratic equation in a
-  const double b = 6 * y - 16;
-  const double c = y * y - 16 * y + 32;
-  const double a = -0.5 * (b + std::sqrt(b * b - 4 * c));
-  return (0.5 * (a - std::sqrt(a * a - 4)));
+  const double omega_cut = 2 * M_PI / T_cut;
+  const double phi = 2 - std::cos(omega_cut);
+  *alpha = (1.0 - std::sin(omega_cut)) / std::cos(omega_cut);
+  *beta = phi - std::sqrt(phi * phi - 1.0); // see paper
 }
+
 
 static uint32_t shorten_time(uint64_t t)
 {
@@ -130,8 +128,9 @@ bool FrequencyCam::initialize()
   dtDecay_ = 1.0 - dtMix_;
   const double T_prefilter =
     std::max(1.0, this->declare_parameter<double>("prefilter_event_cutoff", 40));
-  const double alpha_prefilter = compute_alpha_prefilter(T_prefilter);
-  const double beta_prefilter = alpha_prefilter;
+  double alpha_prefilter, beta_prefilter;
+  compute_alpha_beta(T_prefilter, &alpha_prefilter, &beta_prefilter);
+
   c_[0] = alpha_prefilter + beta_prefilter;
   c_[1] = -alpha_prefilter * beta_prefilter;
   c_p_ = 0.5 * (1 + beta_prefilter);
@@ -140,8 +139,11 @@ bool FrequencyCam::initialize()
   noiseFilterDtPass_ = static_cast<uint32_t>(std::abs(dt_pass) * 1e6);
   noiseFilterDtDead_ = static_cast<uint32_t>(std::abs(dt_dead) * 1e6);
   resetThreshold_ = this->declare_parameter<double>("reset_threshold", 0.2);
+  stalePixelThreshold_ = this->declare_parameter<double>("stale_pixel_threshold", 10.0);
   numGoodCyclesRequired_ = static_cast<uint8_t>(this->declare_parameter<int>(
     "num_good_cycles_required", std::clamp((int)(1.0 / dtMix_), 0, 254)));
+  RCLCPP_INFO_STREAM(get_logger(), static_cast<int>(numGoodCyclesRequired_) <<
+                     " good cycles required");
 #ifdef DEBUG
   debugX_ = static_cast<uint16_t>(this->declare_parameter<int>("debug_x", 320));
   debugY_ = static_cast<uint16_t>(this->declare_parameter<int>("debug_y", 240));
@@ -281,7 +283,7 @@ void FrequencyCam::playEventsFromBagExtTimeStamps(const std::string & bagName)
   uint32_t frameCount(0);
   const std::string path = this->declare_parameter<std::string>("path", "./frames");
   std::filesystem::create_directories(path);
-  const auto stamps = read_ts("mv_time_stamps.txt");
+  const auto stamps = read_ts("mv_timestamps.txt");
   if (stamps.empty()) {
     RCLCPP_ERROR(get_logger(), "no time stamps found!");
     return;
@@ -320,6 +322,8 @@ void FrequencyCam::playEventsFromBagExtTimeStamps(const std::string & bagName)
           char fname[256];
           snprintf(fname, sizeof(fname) - 1, "/frame_%05u.jpg", frameCount);
           cv::imwrite(path + fname, img);
+          std::cout << stamps[frameCount] << " frame " << frameCount << " events: " << numEvents
+                    << std::endl;
           frameCount++;
           numEvents = 0;
         }
@@ -391,8 +395,8 @@ void FrequencyCam::updateState(State * state, const Event & e)
   // prefiltering (detrend, accumulate, high pass)
   // x_k has the current filtered signal (log(illumination))
   //
-  // raw change in polarity, will be 0 or +-1
-  const float dp = static_cast<int8_t>(e.polarity) - static_cast<int8_t>(s.p_skip_idx.p());
+  // raw change in polarity, will be 0 or +-2
+  const float dp = 2 * (static_cast<int8_t>(e.polarity) - static_cast<int8_t>(s.p_skip_idx.p()));
   // run the filter (see paper)
   const auto x_k = c_[0] * s.x[0] + c_[1] * s.x[1] + c_p_ * dp;
 #ifdef SIMPLE_EVENT_IMAGE
@@ -401,7 +405,7 @@ void FrequencyCam::updateState(State * state, const Event & e)
 #ifdef NAIVE
   if (dp > 1e-6) {
 #else
-  if (((!s.avg_cnt) && (x_k > 0 && s.x[0] <= 0)) || (s.avg_cnt && dp > 1e-6)) {
+  if (((!s.avg_cnt) && (x_k < 0 && s.x[0] > 0)) || (s.avg_cnt && dp < 1e-6)) {
 #endif
     // measure period upon transition from lower to upper half, i.e.
     // when ON events happen. This is more precise than on the other flank
@@ -428,11 +432,11 @@ void FrequencyCam::updateState(State * state, const Event & e)
 #endif
     } else {
       // not in restart phase
-      if (abs(dt - s.dt_avg) > s.dt_avg * resetThreshold_) {
+      if (abs(dt - s.dt_avg) > std::abs(s.dt_avg) * resetThreshold_) {
         // too far away from avg, ignore this dt
-        if (s.p_skip_idx.badDataCountLimitReached() || dt * resetThreshold_ > dtMax_) {
+        if (s.p_skip_idx.badDataCountLimitReached() || dt > dtMax_ * stalePixelThreshold_) {
           // gotten too many bad dts or this pixel has not seen an update
-          // in a very long time. Reset the average
+          // in a very long time. Reset the average and clear the state
           s.dt_avg = std::clamp(dt, dtMin_, dtMax_);
           s.avg_cnt = numGoodCyclesRequired_;
           s.x[0] = 0;
@@ -455,7 +459,7 @@ void FrequencyCam::updateState(State * state, const Event & e)
         }
       }
     }
-#else
+#else  // no averaging
     s.dt_avg = dt;
     s.p_skip_idx.resetBadDataCount();
 #endif
@@ -463,21 +467,22 @@ void FrequencyCam::updateState(State * state, const Event & e)
 #ifdef DEBUG
     if (e.x == debugX_ && e.y == debugY_) {
       debug_flip << std::setprecision(10) << e.t << " " << dt << " " << s.dt_avg << " "
-                 << (int)s.avg_cnt << std::endl;
+                 << (int)s.avg_cnt << " " << x_k << " " << s.x[0] << std::endl;
     }
 #endif
   }
-  s.p_skip_idx.setPolarity(e.polarity);
-  s.x[1] = s.x[0];
-  s.x[0] = x_k;
 #ifdef DEBUG
   if (e.x == debugX_ && e.y == debugY_) {
     const double dt = (e.t - s.t_flip) * 1e-6;
     const double f = s.dt_avg < 1e-6f ? 0 : (1.0 / s.dt_avg);
-    debug << e.t << " " << x_k << " " << dt << " " << s.dt_avg << " " << f << " " << dp << " "
+    debug << e.t << " " << dp << " " << x_k << " " << s.x[0] << " " << s.x[1] << " " << dt << " "
+          << s.dt_avg << " " << f << " "
           << (int)s.p_skip_idx.getBadDataCount() << " " << (int)s.avg_cnt << std::endl;
   }
 #endif
+  s.p_skip_idx.setPolarity(e.polarity);
+  s.x[1] = s.x[0];
+  s.x[0] = x_k;
 }
 
 static void compute_max(const cv::Mat & img, double * maxVal)

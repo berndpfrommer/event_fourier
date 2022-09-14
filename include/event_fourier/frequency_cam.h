@@ -114,9 +114,6 @@ private:
     uint32_t t_flip;    // time of last flip
     variable_t x[2];    // current and lagged signal x
     variable_t dt_avg;  // average sample time (time between events)
-    // could collapse 6 bytes into 1, reducing
-    // total to 32 + 21 = 53 bytes
-    // these 4 bytes could be collapsed into 1 bit
     PackedVar p_skip_idx;  // polarity, skip cnt, idx
     uint8_t avg_cnt{0};    // number of dt til good average
 #ifdef SIMPLE_EVENT_IMAGE
@@ -251,7 +248,8 @@ private:
   variable_t c_p_{0};
   variable_t dtMix_{1.0 / 100.0};
   variable_t dtDecay_{1 - dtMix_};
-  variable_t resetThreshold_{5};
+  variable_t resetThreshold_{0.2};
+  variable_t stalePixelThreshold_{10.0};
   variable_t dtMin_{0};
   variable_t dtMax_{1.0};
   uint8_t numGoodCyclesRequired_{3};

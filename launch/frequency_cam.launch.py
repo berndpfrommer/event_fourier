@@ -52,7 +52,7 @@ def launch_setup(context, *args, **kwargs):
 #             'roi': [300, 220, 40, 40],             
 #             'roi': [280, 200, 80, 80],
 #             'roi': [0, 0, 640, 480],
-             'bag_file': LaunchConfig('bag_file').perform(context),
+             'bag_file': LaunchConfig('bag').perform(context),
              'slice_time': 0.03}],
         remappings=[
             ('~/events', event_topic),
@@ -68,7 +68,7 @@ def generate_launch_description():
                   description='image topic'),
         LaunchArg('event_topic', default_value=['/event_camera/events'],
                   description='event topic'),
-        LaunchArg('bag_file', default_value=[''],
+        LaunchArg('bag', default_value=[''],
                   description='name of bag file to read'),
         OpaqueFunction(function=launch_setup)
         ])

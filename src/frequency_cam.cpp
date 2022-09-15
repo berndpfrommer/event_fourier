@@ -33,7 +33,7 @@
 #include <thread>
 #include <opencv2/imgcodecs.hpp>
 
-//#define DEBUG
+#define DEBUG
 //#define PRINT_IMAGE_HISTOGRAM
 
 //#define NAIVE
@@ -42,6 +42,7 @@
 #ifdef DEBUG
 std::ofstream debug("freq.txt");
 std::ofstream debug_flip("flip.txt");
+std::ofstream debug_readout("readout.txt");
 #endif
 
 namespace event_fourier
@@ -122,6 +123,7 @@ bool FrequencyCam::initialize()
       legendValues_.clear();
     }
   }
+  timeoutCycles_ = this->declare_parameter<int>("num_timeout_cycles", 2.0);
   overlayEvents_ = this->declare_parameter<bool>("overlay_events", false);
   dtMix_ = std::clamp(
     static_cast<float>(this->declare_parameter<double>("dt_averaging_alpha", 0.1)), 0.001f, 1.000f);
@@ -142,8 +144,8 @@ bool FrequencyCam::initialize()
   stalePixelThreshold_ = this->declare_parameter<double>("stale_pixel_threshold", 10.0);
   numGoodCyclesRequired_ = static_cast<uint8_t>(this->declare_parameter<int>(
     "num_good_cycles_required", std::clamp((int)(1.0 / dtMix_), 0, 254)));
-  RCLCPP_INFO_STREAM(get_logger(), static_cast<int>(numGoodCyclesRequired_) <<
-                     " good cycles required");
+  RCLCPP_INFO_STREAM(
+    get_logger(), static_cast<int>(numGoodCyclesRequired_) << " good cycles required");
 #ifdef DEBUG
   debugX_ = static_cast<uint16_t>(this->declare_parameter<int>("debug_x", 320));
   debugY_ = static_cast<uint16_t>(this->declare_parameter<int>("debug_y", 240));
@@ -245,8 +247,8 @@ void FrequencyCam::playEventsFromBag(const std::string & bagName)
       callbackEvents(msg);
       if (hasValidTime) {
         if (t - lastFrameTime > delta_t) {
-          const cv::Mat img = makeImage();
-          lastFrameTime = t;
+          const cv::Mat img = makeImage((lastFrameTime + delta_t).nanoseconds());
+          lastFrameTime = lastFrameTime + delta_t;
           char fname[256];
           snprintf(fname, sizeof(fname) - 1, "/frame_%05u.jpg", frameCount);
           cv::imwrite(path + fname, img);
@@ -290,8 +292,12 @@ void FrequencyCam::playEventsFromBagExtTimeStamps(const std::string & bagName)
   }
 
   size_t numEvents = 0;
+  uint64_t veryFirstTime = 0;
   while (reader.has_next() && frameCount < stamps.size()) {
-    auto bagmsg = reader.read_next();
+    std::shared_ptr<rosbag2_storage::SerializedBagMessage> bagmsg = reader.read_next();
+    if (bagmsg->topic_name != "/event_camera/events") {
+      continue;
+    }
     rclcpp::SerializedMessage serializedMsg(*bagmsg->serialized_data);
     EventArray::SharedPtr msg(new EventArray());
     serialization.deserialize_message(&serializedMsg, &(*msg));
@@ -304,6 +310,9 @@ void FrequencyCam::playEventsFromBagExtTimeStamps(const std::string & bagName)
       const uint8_t * p;
       for (p = p_base; p < p_base + events.size(); p += event_array_msgs::mono::bytes_per_event) {
         const uint64_t t = event_array_msgs::mono::decode_t(p, timeBase);
+        if (veryFirstTime == 0) {
+          veryFirstTime = t;
+        }
         while (t > stamps[frameCount] &&
                frameCount < stamps.size()) {  // crossed a time slot boundary
           if (currMsg) {                      // process all events before the current one
@@ -314,10 +323,10 @@ void FrequencyCam::playEventsFromBagExtTimeStamps(const std::string & bagName)
             currMsg.reset();
           }
 #ifdef SIMPLE_EVENT_IMAGE
-          eventImageDt_ =
-            (stamps[frameCount] - stamps[std::max(static_cast<int>(frameCount) - 1, 0)]) * 1e-9;
+          eventImageDt_ = 1e-9 * (stamps[frameCount] -
+                                  (frameCount > 0 ? stamps[frameCount - 1] : veryFirstTime + 1));
 #endif
-          const cv::Mat img = makeImage();
+          const cv::Mat img = makeImage(stamps[frameCount]);
           // no max frequency specified, calculate highest frequency
           char fname[256];
           snprintf(fname, sizeof(fname) - 1, "/frame_%05u.jpg", frameCount);
@@ -432,7 +441,7 @@ void FrequencyCam::updateState(State * state, const Event & e)
 #endif
     } else {
       // not in restart phase
-      if (abs(dt - s.dt_avg) > std::abs(s.dt_avg) * resetThreshold_) {
+      if (abs(dt - s.dt_avg) > std::abs(s.dt_avg) * resetThreshold_ || dt > dtMax_ || dt < dtMin_) {
         // too far away from avg, ignore this dt
         if (s.p_skip_idx.badDataCountLimitReached() || dt > dtMax_ * stalePixelThreshold_) {
           // gotten too many bad dts or this pixel has not seen an update
@@ -474,10 +483,9 @@ void FrequencyCam::updateState(State * state, const Event & e)
 #ifdef DEBUG
   if (e.x == debugX_ && e.y == debugY_) {
     const double dt = (e.t - s.t_flip) * 1e-6;
-    const double f = s.dt_avg < 1e-6f ? 0 : (1.0 / s.dt_avg);
     debug << e.t << " " << dp << " " << x_k << " " << s.x[0] << " " << s.x[1] << " " << dt << " "
-          << s.dt_avg << " " << f << " "
-          << (int)s.p_skip_idx.getBadDataCount() << " " << (int)s.avg_cnt << std::endl;
+          << s.dt_avg << " " << (int)s.p_skip_idx.getBadDataCount() << " " << (int)s.avg_cnt
+          << std::endl;
   }
 #endif
   s.p_skip_idx.setPolarity(e.polarity);
@@ -692,10 +700,15 @@ cv::Mat FrequencyCam::makeFrequencyAndEventImage(cv::Mat * eventImage) const
                    : makeTransformedFrequencyImage<NoTF, NoEventFrameUpdater>(eventImage));
 }
 
-cv::Mat FrequencyCam::makeImage() const
+cv::Mat FrequencyCam::makeImage(uint64_t t) const
 {
   cv::Mat eventImg;
   cv::Mat rawImg = makeFrequencyAndEventImage(&eventImg);
+#ifdef DEBUG
+  const double v = rawImg.at<float>(debugY_, debugX_);
+  //debug_readout << t << " " << (useLogFrequency_ ? LogTF::inv(v) : NoTF::inv(v)) << std::endl;
+  debug_readout << t << " " << v << std::endl;
+#endif
   cv::Mat scaled;
   double minVal = tfFreq_[0];
   double maxVal = tfFreq_[1];
@@ -742,7 +755,7 @@ cv::Mat FrequencyCam::makeImage() const
 void FrequencyCam::publishImage()
 {
   if (imagePub_.getNumSubscribers() != 0 && height_ != 0) {
-    const cv::Mat window = makeImage();
+    const cv::Mat window = makeImage(this->get_clock()->now().nanoseconds());
     header_.stamp = lastTime_;
     imagePub_.publish(cv_bridge::CvImage(header_, "bgr8", window).toImageMsg());
   }

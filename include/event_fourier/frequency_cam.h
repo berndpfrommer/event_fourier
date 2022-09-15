@@ -135,7 +135,7 @@ private:
   void addLegend(
     cv::Mat * img, const double minVal, const double maxVal,
     const std::vector<float> & centers) const;
-  cv::Mat makeImage() const;
+  cv::Mat makeImage(uint64_t t) const;
   void publishImage();
   void statistics();
   void updateState(State * state, const Event & e);
@@ -166,7 +166,7 @@ private:
   cv::Mat makeTransformedFrequencyImage(cv::Mat * eventFrame) const
   {
     cv::Mat rawImg(height_, width_, CV_32FC1, 0.0);
-    const double maxDt = 1.0 / freq_[0] * 2.0;
+    const double maxDt = 1.0 / freq_[0] * timeoutCycles_;
     const double minFreq = T::tf(freq_[0]);
     for (uint32_t iy = iyStart_; iy < iyEnd_; iy++) {
       for (uint32_t ix = ixStart_; ix < ixEnd_; ix++) {
@@ -188,7 +188,7 @@ private:
           // for more than two periods of the minimum allowed
           // frequency or two periods of the actual estimated
           // period
-          if (dt < maxDt && dt * f < 2) {
+          if (dt < maxDt && dt * f < timeoutCycles_) {
             rawImg.at<float>(iy, ix) = std::max(T::tf(f), minFreq);
           } else {
             rawImg.at<float>(iy, ix) = 0;  // mark as invalid
@@ -271,6 +271,7 @@ private:
   size_t legendBins_;                             // # of bins if legend values are not given
   cv::ColormapTypes colorMap_{cv::COLORMAP_JET};  // colormap for freq
   double eventImageDt_{0};                        // time slice for event visualization
+  float timeoutCycles_{2.0};                      // how many silent cycles until freq is invalid
   bool overlayEvents_{false};
   //
   // ------------------ debugging stuff

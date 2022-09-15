@@ -51,7 +51,7 @@ def launch_setup(context, *args, **kwargs):
              'debug_y': 249,
              'num_frequency_clusters': 0,
              'use_log_frequency': False,
-             'num_timeout_cycles': 2,
+             'num_timeout_cycles': 3,
              'overlay_events': True,
              'legend_width': 0,
              'worker_threads': 0,

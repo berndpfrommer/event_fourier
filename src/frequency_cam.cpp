@@ -373,7 +373,8 @@ void FrequencyCam::initializeState(uint32_t width, uint32_t height, uint32_t t)
   state_ = new State[width * height];
   for (size_t i = 0; i < width * height; i++) {
     State & s = state_[i];
-    s.t_flip = t;
+    s.t_flip_up_down = t;
+    s.t_flip_down_up = t;
     s.x[0] = 0;
     s.x[1] = 0;
 #if defined(NAIVE) || !defined(AVERAGING)
@@ -411,81 +412,61 @@ void FrequencyCam::updateState(State * state, const Event & e)
 #ifdef SIMPLE_EVENT_IMAGE
   s.last_update = e.t;
 #endif
-#ifdef NAIVE
-  if (dp > 1e-6) {
-#else
-  if (((!s.avg_cnt) && (x_k < 0 && s.x[0] > 0)) || (s.avg_cnt && dp < 1e-6)) {
-#endif
-    // measure period upon transition from lower to upper half, i.e.
-    // when ON events happen. This is more precise than on the other flank
-    const float dt = (e.t - s.t_flip) * 1e-6;
-#ifdef AVERAGING
-    if (s.avg_cnt) {
-      // in restart phase
-      if (abs(dt - s.dt_avg) > s.dt_avg * resetThreshold_) {
-        // dt is not consistent with current average,
-        // throw up hands and reset again
-        s.avg_cnt = numGoodCyclesRequired_;
-        s.dt_avg = std::clamp(dt, dtMin_, dtMax_);
-      } else {
-        s.dt_avg = s.dt_avg * dtDecay_ + dtMix_ * dt;
-        s.avg_cnt--;
-      }
-      // either way reset the bad data count
-      s.p_skip_idx.resetBadDataCount();
-#ifdef DEBUG
-      if (e.x == debugX_ && e.y == debugY_) {
-        std::cout << e.t << "   in restart phase(" << (int)s.avg_cnt << ") dt: " << dt
-                  << " init avg: " << s.dt_avg << std::endl;
-      }
-#endif
+  if (x_k < 0 && s.x[0] > 0) {
+    // measure period upon transition from upper to lower half, i.e.
+    // when OFF events happen. This is more precise than on the other flank
+    const float dt_ud = (e.t - s.t_flip_up_down) * 1e-6;
+    if (dt_ud >= dtMin_ && dt_ud <= dtMax_) {
+      s.dt_avg = dt_ud;
     } else {
-      // not in restart phase
-      if (abs(dt - s.dt_avg) > std::abs(s.dt_avg) * resetThreshold_ || dt > dtMax_ || dt < dtMin_) {
-        // too far away from avg, ignore this dt
-        if (s.p_skip_idx.badDataCountLimitReached() || dt > dtMax_ * stalePixelThreshold_) {
-          // gotten too many bad dts or this pixel has not seen an update
-          // in a very long time. Reset the average and clear the state
-          s.dt_avg = std::clamp(dt, dtMin_, dtMax_);
-          s.avg_cnt = numGoodCyclesRequired_;
-          s.x[0] = 0;
-          s.x[1] = 0;
-#ifdef DEBUG
-          if (e.x == debugX_ && e.y == debugY_) {
-            std::cout << e.t << " starting restart phase(" << (int)s.avg_cnt << ") dt: " << dt
-                      << " init avg: " << s.dt_avg << std::endl;
-          }
-#endif
-        } else {
-          s.p_skip_idx.incBadDataCount();
+      const float dt_du = (e.t - s.t_flip_down_up) * 1e-6;
+      if (s.dt_avg > 0) {
+        if (dt_ud > s.dt_avg * timeoutCycles_ && dt_du > 0.5 * s.dt_avg * timeoutCycles_) {
+          s.dt_avg = 0;  // not heard from this pixel in a long time, erase average
         }
       } else {
-        // all well, compound into average
-        s.dt_avg = s.dt_avg * dtDecay_ + dtMix_ * dt;
-        s.p_skip_idx.resetBadDataCount();
-        if (s.avg_cnt != 0) {
-          s.avg_cnt--;
+        if (dt_du >= 0.5 * dtMin_ && dt_du <= 0.5 * dtMax_) {
+          s.dt_avg = 2 * dt_du;  // don't have any average, make do with half-cycle
         }
       }
     }
-#else  // no averaging
-    s.dt_avg = dt;
-    s.p_skip_idx.resetBadDataCount();
-#endif
-    s.t_flip = e.t;
+    s.t_flip_up_down = e.t;
 #ifdef DEBUG
     if (e.x == debugX_ && e.y == debugY_) {
-      debug_flip << std::setprecision(10) << e.t << " " << dt << " " << s.dt_avg << " "
-                 << (int)s.avg_cnt << " " << x_k << " " << s.x[0] << std::endl;
+      debug_flip << std::setprecision(10) << e.t << " " << dt_ud << " " << s.dt_avg << " "
+                 << " " << x_k << " " << s.x[0] << std::endl;
+    }
+#endif
+  } else if (x_k > 0 && s.x[0] < 0) {
+    // use lower to upper transition if required. Less precise though.
+    const float dt_du = (e.t - s.t_flip_down_up) * 1e-6;
+    if (dt_du >= dtMin_ && dt_du <= dtMax_ && s.dt_avg <= 0) {
+      s.dt_avg = dt_du;
+    } else {
+      const float dt_ud = (e.t - s.t_flip_up_down) * 1e-6;
+      if (s.dt_avg > 0) {
+        if (dt_du > s.dt_avg * timeoutCycles_ && dt_ud > 0.5 * s.dt_avg * timeoutCycles_) {
+          s.dt_avg = 0;  // not heard from this pixel in a long time, erase average
+        }
+      } else {
+        if (dt_ud >= 0.5 * dtMin_ && dt_ud <= 0.5 * dtMax_) {
+          s.dt_avg = 2 * dt_ud;  // don't have any average, make do with half-cycle
+        }
+      }
+    }
+    s.t_flip_down_up = e.t;
+#ifdef DEBUG
+    if (e.x == debugX_ && e.y == debugY_) {
+      debug_flip << std::setprecision(10) << e.t << " " << dt_du << " " << s.dt_avg << " "
+                 << " " << x_k << " " << s.x[0] << std::endl;
     }
 #endif
   }
 #ifdef DEBUG
   if (e.x == debugX_ && e.y == debugY_) {
-    const double dt = (e.t - s.t_flip) * 1e-6;
+    const double dt = (e.t - s.t_flip_up_down) * 1e-6;
     debug << e.t << " " << dp << " " << x_k << " " << s.x[0] << " " << s.x[1] << " " << dt << " "
-          << s.dt_avg << " " << (int)s.p_skip_idx.getBadDataCount() << " " << (int)s.avg_cnt
-          << std::endl;
+          << s.dt_avg << std::endl;
   }
 #endif
   s.p_skip_idx.setPolarity(e.polarity);
@@ -493,390 +474,392 @@ void FrequencyCam::updateState(State * state, const Event & e)
   s.x[0] = x_k;
 }
 
-static void compute_max(const cv::Mat & img, double * maxVal)
-{
+  static void compute_max(const cv::Mat & img, double * maxVal)
   {
-    // no max frequency specified, calculate highest frequency
-    cv::Point minLoc, maxLoc;
-    double minVal;
-    cv::minMaxLoc(img, &minVal, maxVal, &minLoc, &maxLoc);
+    {
+      // no max frequency specified, calculate highest frequency
+      cv::Point minLoc, maxLoc;
+      double minVal;
+      cv::minMaxLoc(img, &minVal, maxVal, &minLoc, &maxLoc);
+    }
   }
-}
 
-static void get_valid_pixels(
-  const cv::Mat & img, float minVal, float maxVal, std::vector<float> * values,
-  std::vector<cv::Point> * locations)
-{
-  for (int y = 0; y < img.rows; y++) {
-    for (int x = 0; x < img.cols; x++) {
-      const double v = img.at<float>(y, x);
-      if (v > minVal && v <= maxVal) {
-        values->push_back(v);
-        locations->push_back(cv::Point(x, y));
+  static void get_valid_pixels(
+    const cv::Mat & img, float minVal, float maxVal, std::vector<float> * values,
+    std::vector<cv::Point> * locations)
+  {
+    for (int y = 0; y < img.rows; y++) {
+      for (int x = 0; x < img.cols; x++) {
+        const double v = img.at<float>(y, x);
+        if (v > minVal && v <= maxVal) {
+          values->push_back(v);
+          locations->push_back(cv::Point(x, y));
+        }
       }
     }
   }
-}
 
-// sorting with index from stackoverflow:
-// https://stackoverflow.com/questions/1577475/c-sorting-and-keeping-track-of-indexes
-template <typename T>
-std::vector<size_t> sort_indexes(
-  const std::vector<T> & v, std::vector<size_t> * inverse_idx, std::vector<T> * sorted_v)
-{
-  // initialize original index locations
-  std::vector<size_t> idx(v.size());
-  std::iota(idx.begin(), idx.end(), 0);
+  // sorting with index from stackoverflow:
+  // https://stackoverflow.com/questions/1577475/c-sorting-and-keeping-track-of-indexes
+  template <typename T>
+  std::vector<size_t> sort_indexes(
+    const std::vector<T> & v, std::vector<size_t> * inverse_idx, std::vector<T> * sorted_v)
+  {
+    // initialize original index locations
+    std::vector<size_t> idx(v.size());
+    std::iota(idx.begin(), idx.end(), 0);
 
-  // sort indexes based on comparing values in v
-  // using std::stable_sort instead of std::sort
-  // to avoid unnecessary index re-orderings
-  // when v contains elements of equal values
-  std::stable_sort(idx.begin(), idx.end(), [&v](size_t i1, size_t i2) { return v[i1] < v[i2]; });
-  for (size_t i = 0; i < idx.size(); i++) {
-    (*inverse_idx)[idx[i]] = i;
-    sorted_v->push_back(v[idx[i]]);
+    // sort indexes based on comparing values in v
+    // using std::stable_sort instead of std::sort
+    // to avoid unnecessary index re-orderings
+    // when v contains elements of equal values
+    std::stable_sort(idx.begin(), idx.end(), [&v](size_t i1, size_t i2) { return v[i1] < v[i2]; });
+    for (size_t i = 0; i < idx.size(); i++) {
+      (*inverse_idx)[idx[i]] = i;
+      sorted_v->push_back(v[idx[i]]);
+    }
+    return (idx);
   }
-  return (idx);
-}
 
-/*
+  /*
  * Find frequency labels by clustering
  */
-static cv::Mat label_image(
-  const cv::Mat & freqImg, float minVal, float maxVal, int K, std::vector<float> * centers)
-{
-  std::vector<float> validPixels;
-  std::vector<cv::Point> locations;
-  get_valid_pixels(freqImg, minVal, maxVal, &validPixels, &locations);
+  static cv::Mat label_image(
+    const cv::Mat & freqImg, float minVal, float maxVal, int K, std::vector<float> * centers)
+  {
+    std::vector<float> validPixels;
+    std::vector<cv::Point> locations;
+    get_valid_pixels(freqImg, minVal, maxVal, &validPixels, &locations);
 
-  if ((int)validPixels.size() <= K) {
-    // not enough valid pixels to cluster
-    return (cv::Mat::zeros(freqImg.size(), CV_32FC1));
+    if ((int)validPixels.size() <= K) {
+      // not enough valid pixels to cluster
+      return (cv::Mat::zeros(freqImg.size(), CV_32FC1));
+    }
+    const int attempts = 3;
+    std::vector<int> labels;
+    cv::TermCriteria criteria(cv::TermCriteria::EPS + cv::TermCriteria::COUNT, 10, 1.0);
+    std::vector<float> unsorted_centers;
+    (void)kmeans(
+      validPixels, K, labels, criteria, attempts, cv::KMEANS_PP_CENTERS, unsorted_centers);
+    std::vector<size_t> reverse_idx(unsorted_centers.size());
+    std::vector<size_t> idx = sort_indexes(unsorted_centers, &reverse_idx, centers);
+    cv::Mat labeled = cv::Mat::zeros(freqImg.size(), CV_32FC1);
+    for (size_t i = 0; i < validPixels.size(); i++) {
+      labeled.at<float>(locations[i].y, locations[i].x) = reverse_idx[labels[i]] + 1;
+    }
+    return (labeled);
   }
-  const int attempts = 3;
-  std::vector<int> labels;
-  cv::TermCriteria criteria(cv::TermCriteria::EPS + cv::TermCriteria::COUNT, 10, 1.0);
-  std::vector<float> unsorted_centers;
-  (void)kmeans(validPixels, K, labels, criteria, attempts, cv::KMEANS_PP_CENTERS, unsorted_centers);
-  std::vector<size_t> reverse_idx(unsorted_centers.size());
-  std::vector<size_t> idx = sort_indexes(unsorted_centers, &reverse_idx, centers);
-  cv::Mat labeled = cv::Mat::zeros(freqImg.size(), CV_32FC1);
-  for (size_t i = 0; i < validPixels.size(); i++) {
-    labeled.at<float>(locations[i].y, locations[i].x) = reverse_idx[labels[i]] + 1;
-  }
-  return (labeled);
-}
 
 #ifdef PRINT_IMAGE_HISTOGRAM
-/*
+  /*
  * experimental code used during debugging of clustering
  */
-static void print_image_histogram(cv::Mat & img, const int hbins, float minVal, float maxVal)
-{
-  int channels[1] = {0};  // only one channel
-  cv::MatND hist;
-  const int histSize[1] = {hbins};
-  const float franges[2] = {minVal, maxVal};
-  const float * ranges[1] = {franges};
-  cv::calcHist(
-    &img, 1 /* num images */, channels, cv::Mat(), hist, 1 /* dim of hist */,
-    histSize /* num bins */, ranges /* frequency range */, true /* histogram is uniform */,
-    false /* don't accumulate */);
-  for (int i = 0; i < hbins; i++) {
-    double lv = minVal + (maxVal - minVal) * (float)i / hbins;
-    printf("%6.2f %8.0f\n", lv, hist.at<float>(i));
+  static void print_image_histogram(cv::Mat & img, const int hbins, float minVal, float maxVal)
+  {
+    int channels[1] = {0};  // only one channel
+    cv::MatND hist;
+    const int histSize[1] = {hbins};
+    const float franges[2] = {minVal, maxVal};
+    const float * ranges[1] = {franges};
+    cv::calcHist(
+      &img, 1 /* num images */, channels, cv::Mat(), hist, 1 /* dim of hist */,
+      histSize /* num bins */, ranges /* frequency range */, true /* histogram is uniform */,
+      false /* don't accumulate */);
+    for (int i = 0; i < hbins; i++) {
+      double lv = minVal + (maxVal - minVal) * (float)i / hbins;
+      printf("%6.2f %8.0f\n", lv, hist.at<float>(i));
+    }
   }
-}
 #endif
 
-/*
+  /*
  * format frequency labels for opencv
  */
-static std::string format_freq(double v)
-{
-  std::stringstream ss;
-  //ss << " " << std::fixed << std::setw(7) << std::setprecision(1) << v;
-  ss << " " << std::setw(6) << (int)v;
-  return (ss.str());
-}
+  static std::string format_freq(double v)
+  {
+    std::stringstream ss;
+    //ss << " " << std::fixed << std::setw(7) << std::setprecision(1) << v;
+    ss << " " << std::setw(6) << (int)v;
+    return (ss.str());
+  }
 
-static void draw_labeled_rectangle(
-  cv::Mat * window, int x_off, int y_off, int height, const std::string & text,
-  const cv::Vec3b & color)
-{
-  const cv::Point tl(x_off, y_off);                      // top left
-  const cv::Point br(window->cols - 1, y_off + height);  // bottom right
-  cv::rectangle(*window, tl, br, color, -1 /* filled */, cv::LINE_8);
-  // place text
-  const cv::Point tp(x_off - 2, y_off + height / 2 - 2);
-  const cv::Scalar textColor = CV_RGB(0, 0, 0);
-  cv::putText(
-    *window, text, tp, cv::FONT_HERSHEY_PLAIN, 1.0, textColor, 2.0 /*thickness*/,
-    cv::LINE_AA /* anti-alias */);
-}
+  static void draw_labeled_rectangle(
+    cv::Mat * window, int x_off, int y_off, int height, const std::string & text,
+    const cv::Vec3b & color)
+  {
+    const cv::Point tl(x_off, y_off);                      // top left
+    const cv::Point br(window->cols - 1, y_off + height);  // bottom right
+    cv::rectangle(*window, tl, br, color, -1 /* filled */, cv::LINE_8);
+    // place text
+    const cv::Point tp(x_off - 2, y_off + height / 2 - 2);
+    const cv::Scalar textColor = CV_RGB(0, 0, 0);
+    cv::putText(
+      *window, text, tp, cv::FONT_HERSHEY_PLAIN, 1.0, textColor, 2.0 /*thickness*/,
+      cv::LINE_AA /* anti-alias */);
+  }
 
-std::vector<float> FrequencyCam::findLegendValuesAndText(
-  const double minVal, const double maxVal, const std::vector<float> & centers,
-  std::vector<std::string> * text) const
-{
-  std::vector<float> values;
-  if (legendValues_.empty()) {
-    // no explicit legend values are provided
-    if (numClusters_ == 0) {
-      // if data is not labeled use equidistant bins between min and max val.
-      // This could be either in linear or log space.
-      // If the range of values is large, round to next integer
-      const double range = maxVal - minVal;
-      bool round_it = !useLogFrequency_ && (range / (legendBins_ - 1)) > 2.0;
-      for (size_t i = 0; i < legendBins_; i++) {
-        const double raw_v = minVal + (static_cast<float>(i) / (legendBins_ - 1)) * range;
-        const double v = round_it ? std::round(raw_v) : raw_v;
-        values.push_back(v);
-        text->push_back(format_freq(useLogFrequency_ ? LogTF::inv(v) : v));
+  std::vector<float> FrequencyCam::findLegendValuesAndText(
+    const double minVal, const double maxVal, const std::vector<float> & centers,
+    std::vector<std::string> * text) const
+  {
+    std::vector<float> values;
+    if (legendValues_.empty()) {
+      // no explicit legend values are provided
+      if (numClusters_ == 0) {
+        // if data is not labeled use equidistant bins between min and max val.
+        // This could be either in linear or log space.
+        // If the range of values is large, round to next integer
+        const double range = maxVal - minVal;
+        bool round_it = !useLogFrequency_ && (range / (legendBins_ - 1)) > 2.0;
+        for (size_t i = 0; i < legendBins_; i++) {
+          const double raw_v = minVal + (static_cast<float>(i) / (legendBins_ - 1)) * range;
+          const double v = round_it ? std::round(raw_v) : raw_v;
+          values.push_back(v);
+          text->push_back(format_freq(useLogFrequency_ ? LogTF::inv(v) : v));
+        }
+      } else {
+        // data is labeled (clustered). In this case the value is actually the
+        // cluster label, i.e. an integer ranged 0 ... num_clusters - 1
+        for (size_t i = 0; i < centers.size(); i++) {
+          values.push_back(i);
+          const double v = useLogFrequency_ ? LogTF::inv(centers[i]) : centers[i];
+          text->push_back(format_freq(v));
+        }
       }
     } else {
-      // data is labeled (clustered). In this case the value is actually the
-      // cluster label, i.e. an integer ranged 0 ... num_clusters - 1
-      for (size_t i = 0; i < centers.size(); i++) {
-        values.push_back(i);
-        const double v = useLogFrequency_ ? LogTF::inv(centers[i]) : centers[i];
-        text->push_back(format_freq(v));
+      // legend values are explicitly given
+      for (const auto & lv : legendValues_) {
+        values.push_back(useLogFrequency_ ? LogTF::tf(lv) : lv);
+        text->push_back(format_freq(lv));
       }
     }
-  } else {
-    // legend values are explicitly given
-    for (const auto & lv : legendValues_) {
-      values.push_back(useLogFrequency_ ? LogTF::tf(lv) : lv);
-      text->push_back(format_freq(lv));
-    }
+    return (values);
   }
-  return (values);
-}
 
-void FrequencyCam::addLegend(
-  cv::Mat * window, const double minVal, const double maxVal,
-  const std::vector<float> & centers) const
-{
-  const int x_off = window->cols - legendWidth_;  // left border of legend
-  const double range = maxVal - minVal;
-  std::vector<std::string> text;
-  std::vector<float> values = findLegendValuesAndText(minVal, maxVal, centers, &text);
-  if (!values.empty()) {
-    cv::Mat valueMat(values.size(), 1, CV_32FC1);
-    for (size_t i = 0; i < values.size(); i++) {
-      valueMat.at<float>(i, 0) = values[i];
+  void FrequencyCam::addLegend(
+    cv::Mat * window, const double minVal, const double maxVal, const std::vector<float> & centers)
+    const
+  {
+    const int x_off = window->cols - legendWidth_;  // left border of legend
+    const double range = maxVal - minVal;
+    std::vector<std::string> text;
+    std::vector<float> values = findLegendValuesAndText(minVal, maxVal, centers, &text);
+    if (!values.empty()) {
+      cv::Mat valueMat(values.size(), 1, CV_32FC1);
+      for (size_t i = 0; i < values.size(); i++) {
+        valueMat.at<float>(i, 0) = values[i];
+      }
+      // rescale values matrix the same way as original image
+      cv::Mat scaledValueMat;
+      cv::convertScaleAbs(valueMat, scaledValueMat, 255.0 / range, -minVal * 255.0 / range);
+      cv::Mat colorCode;
+      cv::applyColorMap(scaledValueMat, colorCode, colorMap_);
+      // draw filled rectangles and text labels
+      const int height = window->rows / values.size();  // integer division
+      for (size_t i = 0; i < values.size(); i++) {
+        const int y_off = static_cast<float>(i) / values.size() * window->rows;
+        draw_labeled_rectangle(
+          window, x_off, y_off, height, text[i], colorCode.at<cv::Vec3b>(i, 0));
+      }
+    } else {
+      // for some reason or the other (usually clustering failed), no legend could be drawn
+      cv::Mat roiLegend = (*window)(cv::Rect(x_off, 0, legendWidth_, window->rows));
+      roiLegend.setTo(CV_RGB(0, 0, 0));
     }
-    // rescale values matrix the same way as original image
-    cv::Mat scaledValueMat;
-    cv::convertScaleAbs(valueMat, scaledValueMat, 255.0 / range, -minVal * 255.0 / range);
-    cv::Mat colorCode;
-    cv::applyColorMap(scaledValueMat, colorCode, colorMap_);
-    // draw filled rectangles and text labels
-    const int height = window->rows / values.size();  // integer division
-    for (size_t i = 0; i < values.size(); i++) {
-      const int y_off = static_cast<float>(i) / values.size() * window->rows;
-      draw_labeled_rectangle(window, x_off, y_off, height, text[i], colorCode.at<cv::Vec3b>(i, 0));
-    }
-  } else {
-    // for some reason or the other (usually clustering failed), no legend could be drawn
-    cv::Mat roiLegend = (*window)(cv::Rect(x_off, 0, legendWidth_, window->rows));
-    roiLegend.setTo(CV_RGB(0, 0, 0));
   }
-}
 
-cv::Mat FrequencyCam::makeFrequencyAndEventImage(cv::Mat * eventImage) const
-{
-  if (overlayEvents_) {
-    *eventImage = cv::Mat::zeros(height_, width_, CV_8UC1);
-  }
-  if (useLogFrequency_) {
+  cv::Mat FrequencyCam::makeFrequencyAndEventImage(cv::Mat * eventImage) const
+  {
+    if (overlayEvents_) {
+      *eventImage = cv::Mat::zeros(height_, width_, CV_8UC1);
+    }
+    if (useLogFrequency_) {
+      return (
+        overlayEvents_ ? makeTransformedFrequencyImage<LogTF, EventFrameUpdater>(eventImage)
+                       : makeTransformedFrequencyImage<LogTF, NoEventFrameUpdater>(eventImage));
+    }
     return (
-      overlayEvents_ ? makeTransformedFrequencyImage<LogTF, EventFrameUpdater>(eventImage)
-                     : makeTransformedFrequencyImage<LogTF, NoEventFrameUpdater>(eventImage));
+      overlayEvents_ ? makeTransformedFrequencyImage<NoTF, EventFrameUpdater>(eventImage)
+                     : makeTransformedFrequencyImage<NoTF, NoEventFrameUpdater>(eventImage));
   }
-  return (
-    overlayEvents_ ? makeTransformedFrequencyImage<NoTF, EventFrameUpdater>(eventImage)
-                   : makeTransformedFrequencyImage<NoTF, NoEventFrameUpdater>(eventImage));
-}
 
-cv::Mat FrequencyCam::makeImage(uint64_t t) const
-{
-  cv::Mat eventImg;
-  cv::Mat rawImg = makeFrequencyAndEventImage(&eventImg);
+  cv::Mat FrequencyCam::makeImage(uint64_t t) const
+  {
+    cv::Mat eventImg;
+    cv::Mat rawImg = makeFrequencyAndEventImage(&eventImg);
 #ifdef DEBUG
-  const double v = rawImg.at<float>(debugY_, debugX_);
-  //debug_readout << t << " " << (useLogFrequency_ ? LogTF::inv(v) : NoTF::inv(v)) << std::endl;
-  debug_readout << t << " " << v << std::endl;
+    const double v = rawImg.at<float>(debugY_, debugX_);
+    debug_readout << t << " " << (useLogFrequency_ ? LogTF::inv(v) : NoTF::inv(v)) << std::endl;
 #endif
-  cv::Mat scaled;
-  double minVal = tfFreq_[0];
-  double maxVal = tfFreq_[1];
-  std::vector<float> centers;
-  if (numClusters_ == 0) {
-    if (freq_[1] < 0) {
-      compute_max(rawImg, &maxVal);
-    }
-#ifdef PRINT_IMAGE_HISTOGRAM
-    print_image_histogram(rawImg, 10, minVal, maxVal);
-#endif
-    const double range = maxVal - minVal;
-    cv::convertScaleAbs(rawImg, scaled, 255.0 / range, -minVal * 255.0 / range);
-  } else {
-    cv::Mat labeled = label_image(rawImg, minVal, maxVal, numClusters_, &centers);
-    minVal = 0;
-    maxVal = numClusters_ - 1;
-    const double range = maxVal - minVal;
-    cv::convertScaleAbs(labeled, scaled, 255.0 / range, -minVal * 255.0 / range);
-    if (!centers.empty() && printClusterCenters_) {
-      // print out cluster centers to console
-      std::stringstream ss;
-      for (const auto & c : centers) {
-        ss << " " << std::fixed << std::setw(10) << std::setprecision(6) << c;
+    cv::Mat scaled;
+    double minVal = tfFreq_[0];
+    double maxVal = tfFreq_[1];
+    std::vector<float> centers;
+    if (numClusters_ == 0) {
+      if (freq_[1] < 0) {
+        compute_max(rawImg, &maxVal);
       }
-      RCLCPP_INFO(get_logger(), ss.str().c_str());
+#ifdef PRINT_IMAGE_HISTOGRAM
+      print_image_histogram(rawImg, 10, minVal, maxVal);
+#endif
+      const double range = maxVal - minVal;
+      cv::convertScaleAbs(rawImg, scaled, 255.0 / range, -minVal * 255.0 / range);
+    } else {
+      cv::Mat labeled = label_image(rawImg, minVal, maxVal, numClusters_, &centers);
+      minVal = 0;
+      maxVal = numClusters_ - 1;
+      const double range = maxVal - minVal;
+      cv::convertScaleAbs(labeled, scaled, 255.0 / range, -minVal * 255.0 / range);
+      if (!centers.empty() && printClusterCenters_) {
+        // print out cluster centers to console
+        std::stringstream ss;
+        for (const auto & c : centers) {
+          ss << " " << std::fixed << std::setw(10) << std::setprecision(6) << c;
+        }
+        RCLCPP_INFO(get_logger(), ss.str().c_str());
+      }
+    }
+    cv::Mat window(scaled.rows, scaled.cols + legendWidth_, CV_8UC3);
+    cv::Mat colorImg = window(cv::Rect(0, 0, scaled.cols, scaled.rows));
+    cv::applyColorMap(scaled, colorImg, colorMap_);
+    colorImg.setTo(CV_RGB(0, 0, 0), rawImg == 0);  // render invalid points black
+    if (overlayEvents_) {
+      const cv::Scalar eventColor = CV_RGB(127, 127, 127);
+      // only show events where no frequency is detected
+      colorImg.setTo(eventColor, (rawImg == 0) & eventImg);
+    }
+    if (legendWidth_ > 0) {
+      addLegend(&window, minVal, maxVal, centers);
+    }
+    return (window);
+  }
+
+  void FrequencyCam::publishImage()
+  {
+    if (imagePub_.getNumSubscribers() != 0 && height_ != 0) {
+      const cv::Mat window = makeImage(this->get_clock()->now().nanoseconds());
+      header_.stamp = lastTime_;
+      imagePub_.publish(cv_bridge::CvImage(header_, "bgr8", window).toImageMsg());
     }
   }
-  cv::Mat window(scaled.rows, scaled.cols + legendWidth_, CV_8UC3);
-  cv::Mat colorImg = window(cv::Rect(0, 0, scaled.cols, scaled.rows));
-  cv::applyColorMap(scaled, colorImg, colorMap_);
-  colorImg.setTo(CV_RGB(0, 0, 0), rawImg == 0);  // render invalid points black
-  if (overlayEvents_) {
-    const cv::Scalar eventColor = CV_RGB(127, 127, 127);
-    // only show events where no frequency is detected
-    colorImg.setTo(eventColor, (rawImg == 0) & eventImg);
+
+  bool FrequencyCam::filterNoise(State * s, const Event & newEvent, Event * e_f)
+  {
+    auto const * tp = s->tp;  // time and polarity
+    auto * tp_nc = s->tp;     // non-const
+    bool eventAvailable(false);
+    const uint8_t idx = s->p_skip_idx.idx();
+    const uint8_t lag_1 = idx;  // alias to make code more readable
+    const uint8_t lag_2 = (idx + 3) & 0x03;
+    const uint8_t lag_3 = (idx + 2) & 0x03;
+    const uint8_t lag_4 = (idx + 1) & 0x03;
+
+    if (s->p_skip_idx.skip() == 0) {
+      eventAvailable = true;
+      e_f->setTimeAndPolarity(tp[lag_4]);  // return the one that is 3 events old
+    } else {
+      s->p_skip_idx.decSkip();  // decrement skip variable
+    }
+    // if a DOWN event is followed quickly by an UP event, and
+    // if before the DOWN event a significant amount of time has passed,
+    // the DOWN/UP is almost certainly a noise event that needs to be
+    // filtered out
+    if (
+      (!tp[lag_2].p() && tp[lag_1].p()) && (tp[lag_1].t() - tp[lag_2].t() < noiseFilterDtPass_) &&
+      (tp[lag_2].t() - tp[lag_3].t() > noiseFilterDtDead_)) {
+      s->p_skip_idx.startSkip();
+    }
+    // advance circular buffer pointer and store latest event
+    s->p_skip_idx.setIdx(lag_4);
+    tp_nc[lag_4].set(newEvent.t, newEvent.polarity);
+    // signal whether a filtered event was produced, i.e if *e_f is valid
+    return (eventAvailable);
   }
-  if (legendWidth_ > 0) {
-    addLegend(&window, minVal, maxVal, centers);
+
+  uint32_t FrequencyCam::updateSingleThreaded(
+    uint64_t timeBase, const std::vector<uint8_t> & events)
+  {
+    uint32_t lastEventTime(0);
+    const uint8_t * p_base = &events[0];
+
+    for (const uint8_t * p = p_base; p < p_base + events.size();
+         p += event_array_msgs::mono::bytes_per_event) {
+      Event e;
+      uint64_t t;
+      e.polarity = event_array_msgs::mono::decode_t_x_y_p(p, timeBase, &t, &e.x, &e.y);
+      e.t = shorten_time(t);
+      lastEventTime = e.t;
+      filterAndUpdateState(&state_[e.y * width_ + e.x], e);
+    }
+    return (lastEventTime);
   }
-  return (window);
-}
 
-void FrequencyCam::publishImage()
-{
-  if (imagePub_.getNumSubscribers() != 0 && height_ != 0) {
-    const cv::Mat window = makeImage(this->get_clock()->now().nanoseconds());
-    header_.stamp = lastTime_;
-    imagePub_.publish(cv_bridge::CvImage(header_, "bgr8", window).toImageMsg());
+  uint32_t FrequencyCam::updateMultiThreaded(uint64_t timeBase, const std::vector<uint8_t> & events)
+  {
+    const uint8_t * p_base = &events[0];
+    const uint8_t * p_last_event = p_base + events.size() - event_array_msgs::mono::bytes_per_event;
+    uint32_t lastEventTime = shorten_time(event_array_msgs::mono::decode_t(p_last_event, timeBase));
+    // tell consumers to start working
+    for (auto & b : eventBuffer_) {
+      b.set_events(&events, timeBase);
+      b.writer_done();
+    }
+    // wait for consumers to finish
+    for (auto & b : eventBuffer_) {
+      b.wait_until_read_complete();
+    }
+    return (lastEventTime);
   }
-}
 
-bool FrequencyCam::filterNoise(State * s, const Event & newEvent, Event * e_f)
-{
-  auto const * tp = s->tp;  // time and polarity
-  auto * tp_nc = s->tp;     // non-const
-  bool eventAvailable(false);
-  const uint8_t idx = s->p_skip_idx.idx();
-  const uint8_t lag_1 = idx;  // alias to make code more readable
-  const uint8_t lag_2 = (idx + 3) & 0x03;
-  const uint8_t lag_3 = (idx + 2) & 0x03;
-  const uint8_t lag_4 = (idx + 1) & 0x03;
+  void FrequencyCam::callbackEvents(EventArrayConstPtr msg)
+  {
+    const auto t_start = std::chrono::high_resolution_clock::now();
+    const auto time_base =
+      useSensorTime_ ? msg->time_base : rclcpp::Time(msg->header.stamp).nanoseconds();
+    lastTime_ = rclcpp::Time(msg->header.stamp);
 
-  if (s->p_skip_idx.skip() == 0) {
-    eventAvailable = true;
-    e_f->setTimeAndPolarity(tp[lag_4]);  // return the one that is 3 events old
-  } else {
-    s->p_skip_idx.decSkip();  // decrement skip variable
+    if (state_ == 0 && !msg->events.empty()) {
+      // first event ever, need to allocate state
+      const uint8_t * p = &msg->events[0];
+      uint64_t t;
+      uint16_t x, y;
+      (void)event_array_msgs::mono::decode_t_x_y_p(p, time_base, &t, &x, &y);
+      initializeState(msg->width, msg->height, shorten_time(t) - 1 /* - 1usec */);
+      header_ = msg->header;  // copy frame id
+      lastSeq_ = msg->seq - 1;
+    }
+    lastEventTime_ = (!threads_.empty()) ? updateMultiThreaded(time_base, msg->events)
+                                         : updateSingleThreaded(time_base, msg->events);
+    eventCount_ += msg->events.size() / event_array_msgs::mono::bytes_per_event;
+    msgCount_++;
+    droppedSeq_ += static_cast<int64_t>(msg->seq) - lastSeq_ - 1;
+    lastSeq_ = static_cast<int64_t>(msg->seq);
+
+    const auto t_end = std::chrono::high_resolution_clock::now();
+    totTime_ += std::chrono::duration_cast<std::chrono::microseconds>(t_end - t_start).count();
   }
-  // if a DOWN event is followed quickly by an UP event, and
-  // if before the DOWN event a significant amount of time has passed,
-  // the DOWN/UP is almost certainly a noise event that needs to be
-  // filtered out
-  if (
-    (!tp[lag_2].p() && tp[lag_1].p()) && (tp[lag_1].t() - tp[lag_2].t() < noiseFilterDtPass_) &&
-    (tp[lag_2].t() - tp[lag_3].t() > noiseFilterDtDead_)) {
-    s->p_skip_idx.startSkip();
+
+  void FrequencyCam::statistics()
+  {
+    if (eventCount_ > 0 && totTime_ > 0) {
+      const double usec = static_cast<double>(totTime_);
+      RCLCPP_INFO(
+        get_logger(), "%6.2f Mev/s, %8.2f msgs/s, %8.2f nsec/ev  %6.0f usec/msg, drop: %3ld",
+        double(eventCount_) / usec, msgCount_ * 1.0e6 / usec, 1e3 * usec / (double)eventCount_,
+        usec / msgCount_, droppedSeq_);
+      eventCount_ = 0;
+      totTime_ = 0;
+      msgCount_ = 0;
+      droppedSeq_ = 0;
+    }
   }
-  // advance circular buffer pointer and store latest event
-  s->p_skip_idx.setIdx(lag_4);
-  tp_nc[lag_4].set(newEvent.t, newEvent.polarity);
-  // signal whether a filtered event was produced, i.e if *e_f is valid
-  return (eventAvailable);
-}
 
-uint32_t FrequencyCam::updateSingleThreaded(uint64_t timeBase, const std::vector<uint8_t> & events)
-{
-  uint32_t lastEventTime(0);
-  const uint8_t * p_base = &events[0];
-
-  for (const uint8_t * p = p_base; p < p_base + events.size();
-       p += event_array_msgs::mono::bytes_per_event) {
-    Event e;
-    uint64_t t;
-    e.polarity = event_array_msgs::mono::decode_t_x_y_p(p, timeBase, &t, &e.x, &e.y);
-    e.t = shorten_time(t);
-    lastEventTime = e.t;
-    filterAndUpdateState(&state_[e.y * width_ + e.x], e);
+  std::ostream & operator<<(std::ostream & os, const FrequencyCam::Event & e)
+  {
+    os << std::fixed << std::setw(10) << std::setprecision(6) << e.t * 1e-6 << " "
+       << (int)e.polarity << " " << e.x << " " << e.y;
+    return (os);
   }
-  return (lastEventTime);
-}
-
-uint32_t FrequencyCam::updateMultiThreaded(uint64_t timeBase, const std::vector<uint8_t> & events)
-{
-  const uint8_t * p_base = &events[0];
-  const uint8_t * p_last_event = p_base + events.size() - event_array_msgs::mono::bytes_per_event;
-  uint32_t lastEventTime = shorten_time(event_array_msgs::mono::decode_t(p_last_event, timeBase));
-  // tell consumers to start working
-  for (auto & b : eventBuffer_) {
-    b.set_events(&events, timeBase);
-    b.writer_done();
-  }
-  // wait for consumers to finish
-  for (auto & b : eventBuffer_) {
-    b.wait_until_read_complete();
-  }
-  return (lastEventTime);
-}
-
-void FrequencyCam::callbackEvents(EventArrayConstPtr msg)
-{
-  const auto t_start = std::chrono::high_resolution_clock::now();
-  const auto time_base =
-    useSensorTime_ ? msg->time_base : rclcpp::Time(msg->header.stamp).nanoseconds();
-  lastTime_ = rclcpp::Time(msg->header.stamp);
-
-  if (state_ == 0 && !msg->events.empty()) {
-    // first event ever, need to allocate state
-    const uint8_t * p = &msg->events[0];
-    uint64_t t;
-    uint16_t x, y;
-    (void)event_array_msgs::mono::decode_t_x_y_p(p, time_base, &t, &x, &y);
-    initializeState(msg->width, msg->height, shorten_time(t) - 1 /* - 1usec */);
-    header_ = msg->header;  // copy frame id
-    lastSeq_ = msg->seq - 1;
-  }
-  lastEventTime_ = (!threads_.empty()) ? updateMultiThreaded(time_base, msg->events)
-                                       : updateSingleThreaded(time_base, msg->events);
-  eventCount_ += msg->events.size() / event_array_msgs::mono::bytes_per_event;
-  msgCount_++;
-  droppedSeq_ += static_cast<int64_t>(msg->seq) - lastSeq_ - 1;
-  lastSeq_ = static_cast<int64_t>(msg->seq);
-
-  const auto t_end = std::chrono::high_resolution_clock::now();
-  totTime_ += std::chrono::duration_cast<std::chrono::microseconds>(t_end - t_start).count();
-}
-
-void FrequencyCam::statistics()
-{
-  if (eventCount_ > 0 && totTime_ > 0) {
-    const double usec = static_cast<double>(totTime_);
-    RCLCPP_INFO(
-      get_logger(), "%6.2f Mev/s, %8.2f msgs/s, %8.2f nsec/ev  %6.0f usec/msg, drop: %3ld",
-      double(eventCount_) / usec, msgCount_ * 1.0e6 / usec, 1e3 * usec / (double)eventCount_,
-      usec / msgCount_, droppedSeq_);
-    eventCount_ = 0;
-    totTime_ = 0;
-    msgCount_ = 0;
-    droppedSeq_ = 0;
-  }
-}
-
-std::ostream & operator<<(std::ostream & os, const FrequencyCam::Event & e)
-{
-  os << std::fixed << std::setw(10) << std::setprecision(6) << e.t * 1e-6 << " " << (int)e.polarity
-     << " " << e.x << " " << e.y;
-  return (os);
-}
 
 }  // namespace event_fourier
 

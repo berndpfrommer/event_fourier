@@ -111,11 +111,12 @@ private:
     // 4 * 4  = 16 bytes
     TimeAndPolarity tp[4];  // circular buffer for noise filter
     //
-    uint32_t t_flip;    // time of last flip
-    variable_t x[2];    // current and lagged signal x
-    variable_t dt_avg;  // average sample time (time between events)
-    PackedVar p_skip_idx;  // polarity, skip cnt, idx
-    uint8_t avg_cnt{0};    // number of dt til good average
+    uint32_t t_flip_up_down;  // time of last flip
+    uint32_t t_flip_down_up;  // time of last flip
+    variable_t x[2];          // current and lagged signal x
+    variable_t dt_avg;        // average sample time (time between events)
+    PackedVar p_skip_idx;     // polarity, skip cnt, idx
+    uint8_t avg_cnt{0};       // number of dt til good average
 #ifdef SIMPLE_EVENT_IMAGE
     uint32_t last_update;  // shortened time of last update
 #endif
@@ -174,7 +175,8 @@ private:
         const State & state = state_[offset];
         // state.avg_cnt is zero when enough updates
         // have been compounded into the average
-        const double dt = (lastEventTime_ - state.t_flip) * 1e-6;
+        const double dt =
+          (lastEventTime_ - std::max(state.t_flip_up_down, state.t_flip_down_up)) * 1e-6;
 #ifdef SIMPLE_EVENT_IMAGE
         (void)minFreq;  // suppress compiler warning/error
         const double dtEv = (lastEventTime_ - state.last_update) * 1e-6;
@@ -182,13 +184,15 @@ private:
 #else
         U::update(eventFrame, ix, iy, dt, eventImageDt_);
 #endif
-        if (!state.avg_cnt) {
+        if (ix == debugX_ && iy == debugY_) {
+          std::cout << lastEventTime_ << " dt_avg: " << state.dt_avg << " dt: " << dt
+                    << " mdt: " << maxDt * timeoutCycles_ << " " << state.dt_avg * timeoutCycles_
+                    << std::endl;
+        }
+        if (state.dt_avg > 0) {
           const double f = 1.0 / std::max(state.dt_avg, 1e-6f);
-          // filter out any pixels that have not been updated
-          // for more than two periods of the minimum allowed
-          // frequency or two periods of the actual estimated
-          // period
-          if (dt < maxDt && dt * f < timeoutCycles_) {
+          // filter out any pixels that have not been updated recently
+          if (dt < maxDt * timeoutCycles_ && dt * f < timeoutCycles_) {
             rawImg.at<float>(iy, ix) = std::max(T::tf(f), minFreq);
           } else {
             rawImg.at<float>(iy, ix) = 0;  // mark as invalid

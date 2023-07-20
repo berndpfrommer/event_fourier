@@ -16,12 +16,12 @@
 #ifndef EVENT_FOURIER__EVENT_FOURIER_H_
 #define EVENT_FOURIER__EVENT_FOURIER_H_
 
-#include <event_array_codecs/decoder_factory.h>
-#include <event_array_codecs/event_processor.h>
+#include <event_camera_codecs/decoder_factory.h>
+#include <event_camera_codecs/event_processor.h>
 #include <stdlib.h>
 
 #include <cstdlib>
-#include <event_array_msgs/msg/event_array.hpp>
+#include <event_camera_msgs/msg/event_packet.hpp>
 #include <image_transport/image_transport.hpp>
 #include <memory>
 #include <opencv2/core/core.hpp>
@@ -30,7 +30,7 @@
 
 namespace event_fourier
 {
-class EventFourier : public rclcpp::Node, event_array_codecs::EventProcessor
+class EventFourier : public rclcpp::Node, event_camera_codecs::EventProcessor
 {
 public:
   typedef std::complex<double> complex_t;
@@ -46,11 +46,11 @@ public:
   EventFourier & operator=(const EventFourier &) = delete;
 
 private:
-  using EventArray = event_array_msgs::msg::EventArray;
-  using EventArrayConstPtr = EventArray::ConstSharedPtr;
+  using EventPacket = event_camera_msgs::msg::EventPacket;
+  using EventPacketConstPtr = EventPacket::ConstSharedPtr;
   void readEventsFromBag(const std::string & bagName);
   bool initialize();
-  void callbackEvents(EventArrayConstPtr msg);
+  void callbackEvents(EventPacketConstPtr msg);
   void resetState(uint32_t width, uint32_t height);
   void updateState(
     const uint8_t f_idx, const uint16_t x, const uint16_t y, uint64_t t, bool polarity);
@@ -73,7 +73,7 @@ private:
   uint64_t sliceTime_{0};
   bool useSensorTime_;
   image_transport::Publisher imagePub_;
-  rclcpp::Subscription<EventArray>::SharedPtr eventSub_;
+  rclcpp::Subscription<EventPacket>::SharedPtr eventSub_;
   rclcpp::TimerBase::SharedPtr pubTimer_;
   rclcpp::TimerBase::SharedPtr statsTimer_;
 
@@ -92,7 +92,7 @@ private:
   int64_t lastSeq_{0};
   int64_t droppedSeq_{0};
   std_msgs::msg::Header header_;
-  event_array_codecs::DecoderFactory<EventFourier> decoderFactory_;
+  event_camera_codecs::DecoderFactory<EventPacket, EventFourier> decoderFactory_;
 };
 }  // namespace event_fourier
 #endif  // EVENT_FOURIER__EVENT_FOURIER_H_

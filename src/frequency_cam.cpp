@@ -16,7 +16,7 @@
 #include "event_fourier/frequency_cam.h"
 
 #include <cv_bridge/cv_bridge.h>
-#include <event_array_codecs/decoder.h>
+#include <event_camera_codecs/decoder.h>
 #include <math.h>
 
 #include <algorithm>  // std::sort, std::stable_sort, std::clamp
@@ -47,7 +47,7 @@ std::ofstream debug_readout("readout.txt");
 
 namespace event_fourier
 {
-using EventArray = event_array_msgs::msg::EventArray;
+using EventPacket = event_camera_msgs::msg::EventPacket;
 
 FrequencyCam::FrequencyCam(const rclcpp::NodeOptions & options) : Node("frequency_cam", options)
 {
@@ -147,7 +147,7 @@ bool FrequencyCam::initialize()
     1.0 / std::max(this->declare_parameter<double>("publishing_frequency", 20.0), 1.0);
 
   if (bag.empty()) {
-    eventSub_ = this->create_subscription<EventArray>(
+    eventSub_ = this->create_subscription<EventPacket>(
       "~/events", qos, std::bind(&FrequencyCam::callbackEvents, this, std::placeholders::_1));
     pubTimer_ = rclcpp::create_timer(
       this, this->get_clock(), rclcpp::Duration::from_seconds(eventImageDt_),
@@ -166,7 +166,7 @@ void FrequencyCam::playEventsFromBag(const std::string & bagName)
   rclcpp::Time lastFrameTime(0);
   rosbag2_cpp::Reader reader;
   reader.open(bagName);
-  rclcpp::Serialization<EventArray> serialization;
+  rclcpp::Serialization<EventPacket> serialization;
   const auto delta_t = rclcpp::Duration::from_seconds(eventImageDt_);
   bool hasValidTime = false;
   uint32_t frameCount(0);
@@ -176,7 +176,7 @@ void FrequencyCam::playEventsFromBag(const std::string & bagName)
   while (reader.has_next()) {
     auto bagmsg = reader.read_next();
     rclcpp::SerializedMessage serializedMsg(*bagmsg->serialized_data);
-    EventArray::SharedPtr msg(new EventArray());
+    EventPacket::SharedPtr msg(new EventPacket());
     serialization.deserialize_message(&serializedMsg, &(*msg));
     if (msg) {
       const rclcpp::Time t(msg->header.stamp);
@@ -613,24 +613,21 @@ bool FrequencyCam::filterNoise(State * s, const Event & newEvent, Event * e_f)
   return (eventAvailable);
 }
 
-void FrequencyCam::callbackEvents(EventArrayConstPtr msg)
+void FrequencyCam::callbackEvents(EventPacketConstPtr msg)
 {
   const auto t_start = std::chrono::high_resolution_clock::now();
-  const auto time_base =
-    useSensorTime_ ? msg->time_base : rclcpp::Time(msg->header.stamp).nanoseconds();
   lastTime_ = rclcpp::Time(msg->header.stamp);
   auto decoder = decoderFactory_.getInstance(msg->encoding, msg->width, msg->height);
-  decoder->setTimeBase(time_base);
   if (state_ == 0 && !msg->events.empty()) {
     uint64_t t;
-    if (!decoder->findFirstSensorTime(msg->events.data(), msg->events.size(), &t)) {
+    if (!decoder->findFirstSensorTime(*msg, &t)) {
       return;
     }
     initializeState(msg->width, msg->height, shorten_time(t) - 1 /* - 1usec */);
     header_ = msg->header;  // copy frame id
     lastSeq_ = msg->seq - 1;
   }
-  decoder->decode(msg->events.data(), msg->events.size(), this);
+  decoder->decode(*msg, this);
   msgCount_++;
   droppedSeq_ += static_cast<int64_t>(msg->seq) - lastSeq_ - 1;
   lastSeq_ = static_cast<int64_t>(msg->seq);

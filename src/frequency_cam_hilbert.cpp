@@ -16,7 +16,7 @@
 #include "event_fourier/frequency_cam_hilbert.h"
 
 #include <cv_bridge/cv_bridge.h>
-#include <event_array_msgs/decode.h>
+#include <event_camera_msgs/decode.h>
 
 #include <fstream>
 #include <image_transport/image_transport.hpp>
@@ -97,7 +97,7 @@ bool FrequencyCamHilbert::initialize()
       "using roi: (" << roi_[0] << ", " << roi_[1] << ") w: " << roi_[2] << " h: " << roi_[3]);
   }
   if (bag.empty()) {
-    eventSub_ = this->create_subscription<EventArray>(
+    eventSub_ = this->create_subscription<EventPacket>(
       "~/events", qos,
       std::bind(&FrequencyCamHilbert::callbackEvents, this, std::placeholders::_1));
     double T = 1.0 / std::max(this->declare_parameter<double>("publishing_frequency", 20.0), 1.0);
@@ -207,7 +207,7 @@ void FrequencyCamHilbert::readEventsFromBag(const std::string & bagName)
   rclcpp::Time t0;
   rosbag2_cpp::Reader reader;
   reader.open(bagName);
-  rclcpp::Serialization<event_array_msgs::msg::EventArray> serialization;
+  rclcpp::Serialization<event_camera_msgs::msg::EventPacket> serialization;
 #ifdef DEBUG_FREQ
   size_t lastCount = 0;
 #endif
@@ -215,7 +215,7 @@ void FrequencyCamHilbert::readEventsFromBag(const std::string & bagName)
     auto bagmsg = reader.read_next();
     // if (bagmsg->topic_name == topic)
     rclcpp::SerializedMessage serializedMsg(*bagmsg->serialized_data);
-    EventArray::SharedPtr msg(new EventArray());
+    EventPacket::SharedPtr msg(new EventPacket());
     serialization.deserialize_message(&serializedMsg, &(*msg));
     callbackEvents(msg);
 #ifdef DEBUG
@@ -300,7 +300,7 @@ void FrequencyCamHilbert::updateState(const uint16_t x, const uint16_t y, uint64
 #endif
 }
 
-void FrequencyCamHilbert::callbackEvents(EventArrayConstPtr msg)
+void FrequencyCamHilbert::callbackEvents(EventPacketConstPtr msg)
 {
   const auto t_start = std::chrono::high_resolution_clock::now();
   const auto time_base =
@@ -312,7 +312,7 @@ void FrequencyCamHilbert::callbackEvents(EventArrayConstPtr msg)
     const uint8_t * p = &msg->events[0];
     uint64_t t;
     uint16_t x, y;
-    (void)event_array_msgs::mono::decode_t_x_y_p(p, time_base, &t, &x, &y);
+    (void)event_camera_msgs::mono::decode_t_x_y_p(p, time_base, &t, &x, &y);
     (void)x;
     (void)y;
     initializeState(msg->width, msg->height, t - 1000L /* - 1usec */);
@@ -325,7 +325,7 @@ void FrequencyCamHilbert::callbackEvents(EventArrayConstPtr msg)
   for (const uint8_t * p = p_base; p < p_base + msg->events.size(); p += BYTES_PER_EVENT) {
     uint64_t t;
     uint16_t x, y;
-    const bool polarity = event_array_msgs::mono::decode_t_x_y_p(p, time_base, &t, &x, &y);
+    const bool polarity = event_camera_msgs::mono::decode_t_x_y_p(p, time_base, &t, &x, &y);
     lastEventTime = t;
 #ifdef DEBUG
     if (x == 319 && y == 239) {

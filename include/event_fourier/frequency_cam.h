@@ -16,12 +16,12 @@
 #ifndef EVENT_FOURIER__FREQUENCY_CAM_H_
 #define EVENT_FOURIER__FREQUENCY_CAM_H_
 
-#include <event_array_codecs/decoder_factory.h>
-#include <event_array_codecs/event_processor.h>
+#include <event_camera_codecs/decoder_factory.h>
+#include <event_camera_codecs/event_processor.h>
 #include <stdlib.h>
 
 #include <cstdlib>
-#include <event_array_msgs/msg/event_array.hpp>
+#include <event_camera_msgs/msg/event_packet.hpp>
 #include <image_transport/image_transport.hpp>
 #include <iostream>
 #include <opencv2/core/core.hpp>
@@ -40,7 +40,7 @@
 
 namespace event_fourier
 {
-class FrequencyCam : public rclcpp::Node, public event_array_codecs::EventProcessor
+class FrequencyCam : public rclcpp::Node, public event_camera_codecs::EventProcessor
 {
 public:
   explicit FrequencyCam(const rclcpp::NodeOptions & options);
@@ -137,12 +137,12 @@ private:
 #endif
   };
 
-  using EventArray = event_array_msgs::msg::EventArray;
-  using EventArrayConstPtr = EventArray::ConstSharedPtr;
+  using EventPacket = event_camera_msgs::msg::EventPacket;
+  using EventPacketConstPtr = EventPacket::ConstSharedPtr;
   void playEventsFromBag(const std::string & bagName);
   bool initialize();
   void initializeState(uint32_t width, uint32_t height, uint32_t t);
-  void callbackEvents(EventArrayConstPtr msg);
+  void callbackEvents(EventPacketConstPtr msg);
   std::vector<float> findLegendValuesAndText(
     const double minVal, const double maxVal, const std::vector<float> & centers,
     std::vector<std::string> * text) const;
@@ -239,7 +239,7 @@ private:
   rclcpp::Time lastTime_{0};
   bool useSensorTime_;
   image_transport::Publisher imagePub_;
-  rclcpp::Subscription<EventArray>::SharedPtr eventSub_;
+  rclcpp::Subscription<EventPacket>::SharedPtr eventSub_;
   rclcpp::TimerBase::SharedPtr pubTimer_;
   rclcpp::TimerBase::SharedPtr statsTimer_;
 
@@ -289,7 +289,7 @@ private:
   double eventImageDt_{0};                        // time slice for event visualization
   float timeoutCycles_{2.0};                      // how many silent cycles until freq is invalid
   bool overlayEvents_{false};
-  event_array_codecs::DecoderFactory<FrequencyCam> decoderFactory_;
+  event_camera_codecs::DecoderFactory<EventPacket, FrequencyCam> decoderFactory_;
   //
   // ------------------ debugging stuff
   uint16_t debugX_{0};

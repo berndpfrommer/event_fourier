@@ -16,7 +16,7 @@
 #include "event_fourier/event_fourier.h"
 
 #include <cv_bridge/cv_bridge.h>
-#include <event_array_codecs/decoder.h>
+#include <event_camera_codecs/decoder.h>
 
 #include <image_transport/image_transport.hpp>
 #include <opencv2/imgproc.hpp>
@@ -87,7 +87,7 @@ bool EventFourier::initialize()
   }
   RCLCPP_INFO_STREAM(this->get_logger(), "frequencies: " << freq_[0] << " - " << freq_[1]);
   if (bag.empty()) {
-    eventSub_ = this->create_subscription<EventArray>(
+    eventSub_ = this->create_subscription<EventPacket>(
       "~/events", qos, std::bind(&EventFourier::callbackEvents, this, std::placeholders::_1));
     double T = 1.0 / std::max(this->declare_parameter<double>("publishing_frequency", 20.0), 1.0);
     pubTimer_ = rclcpp::create_timer(
@@ -182,12 +182,12 @@ void EventFourier::readEventsFromBag(const std::string & bagName)
   rclcpp::Time t0;
   rosbag2_cpp::Reader reader;
   reader.open(bagName);
-  rclcpp::Serialization<event_array_msgs::msg::EventArray> serialization;
+  rclcpp::Serialization<event_camera_msgs::msg::EventPacket> serialization;
   while (reader.has_next()) {
     auto bagmsg = reader.read_next();
     // if (bagmsg->topic_name == topic)
     rclcpp::SerializedMessage serializedMsg(*bagmsg->serialized_data);
-    EventArray::SharedPtr msg(new EventArray());
+    EventPacket::SharedPtr msg(new EventPacket());
     serialization.deserialize_message(&serializedMsg, &(*msg));
     callbackEvents(msg);
   }
@@ -349,11 +349,9 @@ void EventFourier::updateState(
   state_[offset + S_AMP2].imag(adT);
 }
 
-void EventFourier::callbackEvents(EventArrayConstPtr msg)
+void EventFourier::callbackEvents(EventPacketConstPtr msg)
 {
   const auto t_start = std::chrono::high_resolution_clock::now();
-  const auto time_base =
-    useSensorTime_ ? msg->time_base : rclcpp::Time(msg->header.stamp).nanoseconds();
   lastTime_ = rclcpp::Time(msg->header.stamp);
 
   if (state_ == 0) {
@@ -371,8 +369,7 @@ void EventFourier::callbackEvents(EventArrayConstPtr msg)
     RCLCPP_WARN_STREAM(get_logger(), "invalid encoding: " << msg->encoding);
     return;
   }
-  decoder->setTimeBase(time_base);
-  decoder->decode(&msg->events[0], msg->events.size(), this);
+  decoder->decode(*msg, this);
 
   bool frequencyChanged(false);
 #ifdef DEBUG_FREQ_CHANGE

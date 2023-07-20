@@ -19,7 +19,7 @@
 #include <stdlib.h>
 
 #include <cstdlib>
-#include <event_array_msgs/msg/event_array.hpp>
+#include <event_camera_msgs/msg/event_packet.hpp>
 #include <image_transport/image_transport.hpp>
 #include <opencv2/core/core.hpp>
 #include <rclcpp/rclcpp.hpp>
@@ -45,9 +45,9 @@ private:
     variable_t omega{1.51};    // smoothed frequency, initialize to about pi/2
     variable_t dt2_avg{1e-6};  // average of sample time squared
     variable_t t{0};           // last time stamp
-    variable_t p{0};          // lagged polarity of events
-    variable_t x[2]{0, 0};    // current and lagged signal x
-    variable_t dt_avg{1e-6};  // average sample time (time between events)
+    variable_t p{0};           // lagged polarity of events
+    variable_t x[2]{0, 0};     // current and lagged signal x
+    variable_t dt_avg{1e-6};   // average sample time (time between events)
   };
   class FilterSection
   {
@@ -74,12 +74,12 @@ private:
     variable_t x_[2];
     variable_t y_[2];
   };
-  using EventArray = event_array_msgs::msg::EventArray;
-  using EventArrayConstPtr = EventArray::ConstSharedPtr;
+  using EventPacket = event_camera_msgs::msg::EventPacket;
+  using EventPacketConstPtr = EventPacket::ConstSharedPtr;
   void readEventsFromBag(const std::string & bagName);
   bool initialize();
   void initializeState(uint32_t width, uint32_t height, uint64_t t);
-  void callbackEvents(EventArrayConstPtr msg);
+  void callbackEvents(EventPacketConstPtr msg);
   void publishImage();
   void statistics();
   void updateState(const uint16_t x, const uint16_t y, uint64_t t, bool polarity);
@@ -89,7 +89,7 @@ private:
   uint64_t sliceTime_{0};
   bool useSensorTime_;
   image_transport::Publisher imagePub_;
-  rclcpp::Subscription<EventArray>::SharedPtr eventSub_;
+  rclcpp::Subscription<EventPacket>::SharedPtr eventSub_;
   rclcpp::TimerBase::SharedPtr pubTimer_;
   rclcpp::TimerBase::SharedPtr statsTimer_;
 

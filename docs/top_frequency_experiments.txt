@@ -1,0 +1,240 @@
+# How to reach highest possible frequencies
+
+- run only on a single pixel at the center
+
+- problem is missing OFF events. Tried duty cycle of less than 50% to
+  get longer dark times between light pulses but that made it
+  worse. 50% was about optimal
+
+- need brighter pules: raise voltage (on 8 LEDs from 24V -> 25V).
+
+- up to about 150khz is possible but then it gets unrealible
+- decided to stop at about 125kHz, corresponds to period of
+  8usec. Produces 3 on event, one off event at the below settings.
+  The rate is then average of 504 kev/s = 125k cycles/s * 4 ev/cycle
+  The LED voltage was set to 25V giving current of 131mA
+  
+  299  % bias_diff
+  236  % bias_diff_off
+  342  % bias_diff_on
+  1195 % bias_fo
+  1525 % bias_hpf
+  1250 % bias_pr
+  1300 % bias_refr
+
+- played with bias_pr, set it down to 1196, no change.
+  - Event rate  about the same for bias_pr = [999, 1250]
+  - below 999 event rate decreases, stops at 657 completely
+  - event rate increases with increasing bias_pr. This is counter to
+    what the docs say (increasing bias_pr reduces bandwidth). But it
+    only increases ON events, and only very little, so 1250 is about optimal
+
+
+default settings of cam1:
+
+bias_diff            value:  299
+bias_diff_off        value:  221
+bias_diff_on         value:  384
+bias_fo              value: 1477
+bias_hpf             value: 1499
+bias_pr              value: 1250
+bias_refr            value: 1500
+
+Experiments from default settings:
+
+light source running at 100khz
+
+1) vary bias_refr:
+
+bias_refr   rate    %on
+  0         6.68     48
+ 10         6.70     48
+ 95         7.81     48
+200         7.81     48
+300         7.87     48
+398         7.83     48
+500         7.89     48
+600         6.71     48
+700         7.83     48
+800         6.78     48
+900         3.18     48
+1000        3.05     48
+1100        3.03     49
+1199        1.86     50
+1300        0.53     50
+1400        0.02     56
+1500        0.05     44  (default)
+1600        0-2.0    27  rate fluctuates strongly
+1700        0-0.45    2  rate fluctuates strongly
+
+
+2) vary bias_fo (source follower voltage in mV). Higher bias_fo means
+lower bandwidth and less noise.
+2a) for 100khz
+1199       49.445     5
+1250       48.9      13
+1299       49.53      1
+1325       49.54      0
+1333       49.54      0
+1346        0.02     49
+1399        0.01     49
+1477        0.02     46  (default)
+1498        0-2.0    40  fluctuates strongly
+1598        0            still some events
+1698        0            no events at all
+
+2b) for 10khz
+below 500 no events
+500         52.00      0
+700         49.95      4
+800         5-50      4-5  (fluctuates)
+900 (same)
+1000 (same)
+1100         5.20     15
+1199        13.78     24
+1250        14.61     23
+1299        15.11     23
+1325        15.60     23
+1333        15.72     23
+1346        15.80     23
+1399        11.31     25
+1477        46.44     13  (default)
+1498        46.05     12
+1598        49.57     10
+1652        15.35     13
+(max)
+
+
+#
+# --------------------------- ROI scaling ------------------------
+#
+
+10 Hz square wave at 25V/150mA, default bias settings cam1
+
+
+
+  ROI   avg[Mev/s]   per pixel [ev/s]
+
+640x480    18.8           61.2
+
+centered:
+
+1x1         0.013       13000.0
+2x2         0.039        9750.0
+4x4         0.088        5500.0
+8x8         0.173        2703.125
+16x16       0.395        1542.97
+32x32       0.840        820.3125
+64x64       2.11         515.14
+128x128     4.08         249.02
+256x256     7.04         107.42
+
+top left:
+
+1x1         0.012
+2x2         0.038
+4x4         0.087
+8x8         0.170
+16x16       0.376
+32x32       0.810
+64x64       2.290
+128x128     4.09
+256x256     6.79
+
+bottom right:
+
+1x1         0.012
+2x2         0.038
+4x4         0.087
+8x8         0.170
+16x16       0.372
+32x32       0.798
+
+Lowered voltage to 22.9 to avoid hitting the 150mA current limit.
+Still running at 10Hz 0.5 duty cycle
+
+center:
+
+1x1        0.013
+2x2        0.038
+2x1        0.021
+1x2        0.022
+4x4        0.113
+8x8        0.248
+16x16      0.455
+
+full sensor
+640x480    26.4           61.2
+
+Let's try different voltage settings for full sensor (150mA, 10Hz)
+
+voltage amps  MeVs
+
+19      0      26.7
+19.5    0      33.0
+20.0    0      22.7
+20.5    0      24.7
+21.0    0.004  27.5
+21.5    0.015  27.4
+22.0    0.03   27.3
+22.5    0.05   26.5
+22.9    0.06   26.4
+23.0    0.07   26.2
+
+Bottom line: somehow increasing ROI will lower the number of events
+reported *per pixel*. Reason is unclear why.
+
+
+# ---------------------------------------------------------------------------
+
+Let's try to get the most events triggered by changing the light
+source
+
+ROI 1x1 center pixel, 22.9V, default biases cam1
+
+In parenthesis is theoretical rate
+
+  Hz  rate 1x1       rate 2x2   rate 4x4   32x32    256x256  full sensor
+
+   1   0.00007
+  10   0.00070
+  50   0.00347        0.01290   0.05077  2.745(3.55)    32.06(227)    49.37
+ 100   0.0067
+ 150   0.00843
+ 200   0.00898
+1000   0.0086
+2000   0.00693
+5000   0.00097
+ 10k   no events
+100k   no events
+
+
+Default settings start flattening out at 100Hz already!
+
+# -------------------------------------------------------------------------
+
+Let's try bumping the speed for single center pixel at 22.9V, all
+defaults but bias_fo
+
+  
+bias_fo  1477      1446    1399    1299   1195(min)
+Hz
+   1   0.00007             0.00006            0.0291
+  10   0.00070             0.00048            0.0291
+  50   0.00347             0.00231            0.02927
+ 100   0.00670     0.00610 0.00459  0.0243    0.02942
+ 150   0.00843             0.00683            0.02957
+ 200   0.00898             0.00905   0.02456   0.02973
+1000   0.00875     0.01670 0.03434   0.03000   0.0312
+2000   0.00693             0.03606   0.03604   0.03215
+5000   0.00097             0.3804    0.05130   0.0351
+ 10k   no events           0.0304    0.06500   0.04015
+100k   no events           no events 0.00010   0.075
+
+
+At low frequencies and low bias_fo the observed events are noise and as such are
+independent of the frequency of the light source. Also the noise
+events are mostly OFF events whereas if the sensor is triggered by
+actual signals those are 50% ON events
+
+

@@ -1,0 +1,148 @@
+
+#
+# Default parameters cam 1:
+# camera serial number: CenturyArks:evc3a_plugin_gen31:00000293
+#
+
+299  % bias_diff
+221  % bias_diff_off
+384  % bias_diff_on
+1477 % bias_fo
+1448 % bias_hpf
+1250 % bias_pr
+1500 % bias_refr
+
+
+#
+# first vary bias_fo
+# MV 2.3.2 range is 1250-1800
+# driver feedback: 1250 -> 1247 and 1800 -> 1741
+
+#  bias = ('fo_1251', 'fo_1299', 'fo_1399', 'fo_1498', 'fo_1598', 'fo_1698', 'fo_1741',)
+
+# 1741  is useless, stops at 16Hz
+# 1698              stops at 128Hz
+# 1299 seems best, but also stops at 65Khz
+# The lower the number, the faster the sensor
+
+
+#
+# vary bias_hpf
+#
+with bias_fo set to 1299, bias_hpf was varied. Little difference was
+seen, except 900 and 999 which are off, and 1094 which was somewhat
+# lower at high frequencies. The default value of 1448 seemes good.
+
+
+#
+# bias_refr
+# IDAC_thin
+# Prophesee doc limits: 1300 - 1800
+# vary bias_refr: this cannot be set independently of bias_fo.
+# Note by prophesee: if bias_fo < 1400, set to 1350 or below
+# The lower the number, the faster the sensor
+
+with bias_fo set to 1299, Could only test 1300 and 1350. Showed very
+little difference.
+So repeated run with bias_fo set to 1403
+Alas, this suppresses any events above 16k, so decided to set bias_fo
+to 1299 and set bias_refr to 1350
+
+
+#
+# bias_diff_on
+# min value = bias_diff + 95 = 394
+#
+# tried values = (391, 397, 404, 411, 425)
+
+Crazy enough, bias_diff of 411 gives *higher* event rates than 391 and
+397, at low and at high frequencies. Choose 411.
+
+#
+# bias_diff_off
+#
+# values = (214, 207, 200, 193, 185, 178)
+#
+makes little difference for the ON rate until 64K frequency. There the
+rate drops  18.6->17.8->4.6 events when going from 214->207->200.
+So set bias_diff_off to 214. That's the only setting for which there
+are any events at 125kHz
+
+
+#
+# now go back and optimize only for frequencies 16384 32768 65536 131074
+#
+It's a big freaking mess. The values did not get adjusted in many
+cases!
+REVERTING the inner and outer loops to have the frequency as the
+innermost
+
+Tried bumping the light to 24V and getting plenty of events at
+125Khz. Turning it down to 22.9V again.
+
+Nope, bumping it up to 25V again for high frequencies
+
+#
+# --------------------- back to square 1
+#
+Fixed bugs in collection: multiple subscriptions and collecting data
+partially from wrong frequencies
+Bumped voltage to 25V
+
+
+base settings (file):
+
+299  % bias_diff
+234  % bias_diff_off
+374  % bias_diff_on
+1250 % bias_fo
+1525 % bias_hpf
+1247 % bias_pr
+1300 % bias_refr
+
+actual parameters when driver starts up:
+
+bias_diff            value:  299
+bias_diff_off        value:  228
+bias_diff_on         value:  370
+bias_fo              value: 1247
+bias_hpf             value: 1525
+bias_pr              value: 1247
+bias_refr            value: 1300
+
+
+1) scanned bias_fo: 1247 and 1277 are the only ones looking
+good. Decided to run with 1247
+
+2) scanned bias_refr: 1300 - 1350 is the allowed range according to
+metavision docs when bias_fo < 1400. There was not much difference,
+with actually 1350 having slightly *more* events than 1350. Went for a
+middle value of 1325
+
+3) scanned bias_hpf: low values of bias_hpf filter out high
+frequencies. Driver rejected any values higher than 1525.
+The bias_hpf parameter really only makes much difference at the very
+low frequencies, presumably because it enables more events to occur on
+the step function. Decided to leave it at 1525 because the pixel time
+series looked better for max frequency.
+
+4) scanned bias_pr: slightly higher event rate at 1200 vs 1247, but
+below 1200 and above 1250 the event rate at 131072khz drops
+rapidly. Leave it at 1247.
+
+5) scanned bias_diff_off. By instructions must be
+less than bias_diff - 85, so bias_diff_off < 214.
+The driver accepts 228 during load, but you cannot set it later higher
+than 214.
+Now we have a problem:
+a) bias_diff_off also affects the ON rate
+b) the 228 setting produces better results than the acceptable 214
+setting, which only gives about 0.9 ON events/cycle and 0.5 OFF
+events/cycle
+Leave it at the bad 228 setting and try diff_on next
+
+6) scanning bias_diff_on. Same problem there: the loaded value of 370
+is out of range. The SDK complains that 394 is the best it can do.
+In practice it means setting it to 394 (which will actuall adjust to
+391). No surprises: with increasing bias_diff_on, the ON event rate
+drops. Best to leave it at the out-of-range value of 370.

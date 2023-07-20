@@ -16,6 +16,8 @@
 #ifndef EVENT_FOURIER__EVENT_FOURIER_H_
 #define EVENT_FOURIER__EVENT_FOURIER_H_
 
+#include <event_array_codecs/decoder_factory.h>
+#include <event_array_codecs/event_processor.h>
 #include <stdlib.h>
 
 #include <cstdlib>
@@ -28,13 +30,18 @@
 
 namespace event_fourier
 {
-class EventFourier : public rclcpp::Node
+class EventFourier : public rclcpp::Node, event_array_codecs::EventProcessor
 {
 public:
   typedef std::complex<double> complex_t;
   explicit EventFourier(const rclcpp::NodeOptions & options);
   ~EventFourier();
-
+  // ------- inherited from EventProcessor
+  void eventCD(uint64_t sensor_time, uint16_t ex, uint16_t ey, uint8_t polarity);
+  void eventExtTrigger(uint64_t, uint8_t, uint8_t) {}
+  void finished() {}
+  void rawData(const char *, size_t) {}
+  // ------- end of inherited
   EventFourier(const EventFourier &) = delete;
   EventFourier & operator=(const EventFourier &) = delete;
 
@@ -85,6 +92,7 @@ private:
   int64_t lastSeq_{0};
   int64_t droppedSeq_{0};
   std_msgs::msg::Header header_;
+  event_array_codecs::DecoderFactory<EventFourier> decoderFactory_;
 };
 }  // namespace event_fourier
 #endif  // EVENT_FOURIER__EVENT_FOURIER_H_

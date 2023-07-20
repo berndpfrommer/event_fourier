@@ -16,7 +16,8 @@
 #ifndef EVENT_FOURIER__FREQUENCY_CAM_H_
 #define EVENT_FOURIER__FREQUENCY_CAM_H_
 
-#include <event_fourier/synchronized_buffer.h>
+#include <event_array_codecs/decoder_factory.h>
+#include <event_array_codecs/event_processor.h>
 #include <stdlib.h>
 
 #include <cstdlib>
@@ -39,7 +40,7 @@
 
 namespace event_fourier
 {
-class FrequencyCam : public rclcpp::Node
+class FrequencyCam : public rclcpp::Node, public event_array_codecs::EventProcessor
 {
 public:
   explicit FrequencyCam(const rclcpp::NodeOptions & options);
@@ -47,6 +48,20 @@ public:
 
   FrequencyCam(const FrequencyCam &) = delete;
   FrequencyCam & operator=(const FrequencyCam &) = delete;
+
+  // ------- inherited from EventProcessor
+  inline void eventCD(uint64_t sensor_time, uint16_t ex, uint16_t ey, uint8_t polarity) override
+  {
+    Event e(shorten_time(sensor_time), ex, ey, polarity);
+    filterAndUpdateState(&state_[e.y * width_ + e.x], e);
+    lastEventTime_ = e.t;
+    eventCount_++;
+  }
+
+  void eventExtTrigger(uint64_t, uint8_t, uint8_t) {}
+  void finished() {}
+  void rawData(const char *, size_t) {}
+  // ------- end of inherited
 
 private:
   typedef float variable_t;
@@ -125,7 +140,6 @@ private:
   using EventArray = event_array_msgs::msg::EventArray;
   using EventArrayConstPtr = EventArray::ConstSharedPtr;
   void playEventsFromBag(const std::string & bagName);
-  void playEventsFromBagExtTimeStamps(const std::string & bagName);
   bool initialize();
   void initializeState(uint32_t width, uint32_t height, uint32_t t);
   void callbackEvents(EventArrayConstPtr msg);
@@ -184,11 +198,6 @@ private:
 #else
         U::update(eventFrame, ix, iy, dt, eventImageDt_);
 #endif
-        if (ix == debugX_ && iy == debugY_) {
-          std::cout << lastEventTime_ << " dt_avg: " << state.dt_avg << " dt: " << dt
-                    << " mdt: " << maxDt * timeoutCycles_ << " " << state.dt_avg * timeoutCycles_
-                    << std::endl;
-        }
         if (state.dt_avg > 0) {
           const double f = 1.0 / std::max(state.dt_avg, 1e-6f);
           // filter out any pixels that have not been updated recently
@@ -208,8 +217,8 @@ private:
   bool filterNoise(State * state, const Event & newEvent, Event * e_f);
   void startThreads();
   void worker(unsigned int id);
-  uint32_t updateMultiThreaded(uint64_t timeBase, const std::vector<uint8_t> & events);
-  uint32_t updateSingleThreaded(uint64_t timeBase, const std::vector<uint8_t> & events);
+  uint32_t updateSingleThreaded(
+    uint64_t timeBase, const std::vector<uint8_t> & events, const std::string & encoding);
   inline void filterAndUpdateState(State * s, const Event & e)
   {
     if (useTemporalNoiseFilter_) {
@@ -221,6 +230,11 @@ private:
       updateState(s, e);
     }
   }
+  static inline uint32_t shorten_time(uint64_t t)
+  {
+    return (static_cast<uint32_t>((t / 1000) & 0xFFFFFFFF));
+  }
+
   // ------ variables ----
   rclcpp::Time lastTime_{0};
   bool useSensorTime_;
@@ -264,8 +278,6 @@ private:
   // ---------- multithreading
   std::vector<std::thread> threads_;
   std::atomic<bool> keepRunning_{true};
-  using EventBuffer = SynchronizedBuffer;
-  std::vector<EventBuffer> eventBuffer_;
   // ---------- visualization
   bool useLogFrequency_{false};                   // visualize log10(frequency)
   int numClusters_{0};                            // number of freq clusters for image
@@ -277,6 +289,7 @@ private:
   double eventImageDt_{0};                        // time slice for event visualization
   float timeoutCycles_{2.0};                      // how many silent cycles until freq is invalid
   bool overlayEvents_{false};
+  event_array_codecs::DecoderFactory<FrequencyCam> decoderFactory_;
   //
   // ------------------ debugging stuff
   uint16_t debugX_{0};

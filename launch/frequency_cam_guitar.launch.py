@@ -1,5 +1,5 @@
 # -----------------------------------------------------------------------------
-# Copyright 2021 Bernd Pfrommer <bernd.pfrommer@gmail.com>
+# Copyright 2022 Bernd Pfrommer <bernd.pfrommer@gmail.com>
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -32,31 +32,45 @@ def launch_setup(context, *args, **kwargs):
         package='event_fourier',
         executable='frequency_cam_node',
         output='screen',
-        # prefix=['xterm -e gdb catch throw -ex run --args'],
         name='frequency_cam',
         parameters=[
             {'use_sensor_time': True,
              'use_sim_time': True,   # attention!
              'frame_id': '',
-             'min_frequency': 200.0,
+             'min_frequency': 70.0,
              'max_frequency': 300.0,
-             #'dt_averaging_alpha': 0.2,  # weight of new period measurement
              'dt_averaging_alpha': 1.0,  # weight of new period measurement
-             #'num_good_cycles_required': 1, # keep low to get good response
-             'num_good_cycles_required': 0, # keep low to get good response
+             #'prefilter_event_cutoff': 10.0, # prefilter cutoff period #events
              'prefilter_event_cutoff': 5.0, # prefilter cutoff period #events
-             #'reset_threshold': 0.15,
-             'reset_threshold': 1000000.0,
-             'debug_x': 8,
-             'debug_y': 324,
+             #'reset_threshold': 0.2,
+             'num_good_cycles_required': 0, # keep low to get good response
+             'reset_threshold': 10000.0,
+             'num_timeout_cycles': 3,
+             'stale_pixel_threshold': 1000.0,
+             'debug_x': 137,
+             'debug_y': 196,
              'num_frequency_clusters': 0,
              'use_log_frequency': False,
-             'num_timeout_cycles': 3,
              'overlay_events': True,
-             'legend_width': 0,
              'worker_threads': 0,
+             # 'legend_frequencies': (180.0, 200, 220, 240, 260, 280, 300),
+             # open tuning:
+             # D-2   73.4
+             # A-2  110.0
+             # D-3  146.8   -> G-3 196.0
+             # F#-3 185.0   -> E-3 164.8
+             # A-3  220.0   -> B-3 246.9
+             # D-3  293.7
+        
+             'legend_frequencies': (73.4, 110.0, 146.8, 185.0, 220.0, 293.7),
+             'legend_width': 0,
+#             'roi': [319, 239, 2, 2],
+#             'roi': [315, 235, 10, 10],
+#             'roi': [300, 220, 40, 40],             
+#             'roi': [280, 200, 80, 80],
+#             'roi': [0, 0, 640, 480],
              'bag_file': LaunchConfig('bag').perform(context),
-             'publishing_frequency': 100.0}],
+             'publishing_frequency': 25.0}],
         remappings=[
             ('~/events', event_topic),
             ('~/image', image_topic)

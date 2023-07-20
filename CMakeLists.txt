@@ -27,7 +27,8 @@ find_package(ament_cmake_ros REQUIRED)
 find_package(OpenCV REQUIRED)
 
 set(ROS2_DEPENDENCIES
-  "event_array_msgs"
+  "event_camera_msgs"
+  "event_camera_codecs"
   "rclcpp"
   "rclcpp_components"
   "rosbag2_cpp"
@@ -64,19 +65,6 @@ rclcpp_components_register_nodes(frequency_cam "event_fourier::FrequencyCam")
 
 ament_auto_add_executable(frequency_cam_node
   src/frequency_cam_node.cpp
-  )
-
-#
-# ---- hilbert version of frequency_cam shared library/component
-#
-ament_auto_add_library(frequency_cam_hilbert SHARED
-  src/frequency_cam_hilbert.cpp
-  )
-
-rclcpp_components_register_nodes(frequency_cam_hilbert "event_fourier::FrequencyCamHilbert")
-
-ament_auto_add_executable(frequency_cam_hilbert_node
-  src/frequency_cam_hilbert_node.cpp
   )
 
 

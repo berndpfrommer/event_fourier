@@ -36,27 +36,26 @@ def launch_setup(context, *args, **kwargs):
         name='frequency_cam',
         parameters=[
             {'use_sensor_time': True,
-             'use_sim_time': True,   # attention!
              'frame_id': '',
-             'min_frequency': 200.0,
-             'max_frequency': 300.0,
-             #'dt_averaging_alpha': 0.2,  # weight of new period measurement
-             'dt_averaging_alpha': 1.0,  # weight of new period measurement
-             #'num_good_cycles_required': 1, # keep low to get good response
-             'num_good_cycles_required': 0, # keep low to get good response
+             'min_frequency': 50.0,
+             'max_frequency': 400.0,
+             'dt_averaging_alpha': 0.5,  # weight of new period measurement
              'prefilter_event_cutoff': 5.0, # prefilter cutoff period #events
-             #'reset_threshold': 0.15,
-             'reset_threshold': 1000000.0,
-             'debug_x': 8,
-             'debug_y': 324,
+             'reset_threshold': 5.0,
+             'debug_x': 319,
+             'debug_y': 239,
              'num_frequency_clusters': 0,
              'use_log_frequency': False,
-             'num_timeout_cycles': 3,
              'overlay_events': True,
-             'legend_width': 0,
              'worker_threads': 0,
+             # 'legend_frequencies': (180.0, 200, 220, 240, 260, 280, 300),
+#             'roi': [319, 239, 2, 2],
+#             'roi': [315, 235, 10, 10],
+#             'roi': [300, 220, 40, 40],             
+#             'roi': [280, 200, 80, 80],
+#             'roi': [0, 0, 640, 480],
              'bag_file': LaunchConfig('bag').perform(context),
-             'publishing_frequency': 100.0}],
+             'slice_time': 0.03}],
         remappings=[
             ('~/events', event_topic),
             ('~/image', image_topic)

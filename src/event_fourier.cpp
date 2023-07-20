@@ -16,7 +16,7 @@
 #include "event_fourier/event_fourier.h"
 
 #include <cv_bridge/cv_bridge.h>
-#include <event_array_msgs/decode.h>
+#include <event_array_codecs/decoder.h>
 
 #include <image_transport/image_transport.hpp>
 #include <opencv2/imgproc.hpp>
@@ -355,8 +355,7 @@ void EventFourier::callbackEvents(EventArrayConstPtr msg)
   const auto time_base =
     useSensorTime_ ? msg->time_base : rclcpp::Time(msg->header.stamp).nanoseconds();
   lastTime_ = rclcpp::Time(msg->header.stamp);
-  const size_t BYTES_PER_EVENT = 8;
-  size_t start_event = 0;
+
   if (state_ == 0) {
     resetState(msg->width, msg->height);
     header_ = msg->header;  // copy frame id
@@ -367,39 +366,15 @@ void EventFourier::callbackEvents(EventArrayConstPtr msg)
   droppedSeq_ += static_cast<int64_t>(msg->seq) - lastSeq_ - 1;
   lastSeq_ = static_cast<int64_t>(msg->seq);
 
-  const uint8_t * p_base = &msg->events[0];
+  auto decoder = decoderFactory_.getInstance(msg->encoding, msg->width, msg->height);
+  if (!decoder) {
+    RCLCPP_WARN_STREAM(get_logger(), "invalid encoding: " << msg->encoding);
+    return;
+  }
+  decoder->setTimeBase(time_base);
+  decoder->decode(&msg->events[0], msg->events.size(), this);
 
   bool frequencyChanged(false);
-  uint64_t lastEventTime(0);
-  for (const uint8_t * p = p_base + start_event; p < p_base + msg->events.size();
-       p += BYTES_PER_EVENT) {
-    uint64_t t;
-    uint16_t x, y;
-    const bool polarity = event_array_msgs::mono::decode_t_x_y_p(p, time_base, &t, &x, &y);
-    lastEventTime = t;
-    for (uint8_t f_idx = 0; f_idx < NUM_FREQ; f_idx++) {
-      updateState(f_idx, x, y, t, polarity);
-    }
-    const size_t off_0 = ((y * width_ + x) * NUM_FREQ + 0) * S_NUM_FIELDS;
-    const complex_t & amp_0 = state_[off_0 + S_AMP2];
-    if (amp_0.imag() > 1.0) {  // enough time has passed
-      const size_t off_1 = ((y * width_ + x) * NUM_FREQ + 1) * S_NUM_FIELDS;
-      const complex_t & amp_1 = state_[off_1 + S_AMP2];
-      if (amp_1.imag() > 1.0) {  // test frequency is also valid
-        frequencyChanged = true;
-        if (amp_1.real() > amp_0.real()) {
-          // amplitude of test freq is higher than reference freq, set ref_freq = test_freq
-          // transfer state from slot 1 -> 0
-          copyState(x, y, 1, 0);
-          // restart test frequency with random frequency;
-          initializeState(x, y, 1, getRandomFreq());
-        } else {
-          // restart test frequency with random frequency;
-          initializeState(x, y, 1, getRandomFreq());
-        }
-      }
-    }
-  }
 #ifdef DEBUG_FREQ_CHANGE
   if (frequencyChanged) {
     printFrequencies();
@@ -407,9 +382,34 @@ void EventFourier::callbackEvents(EventArrayConstPtr msg)
 #else
   (void)frequencyChanged;
 #endif
-  lastEventTime_ = lastEventTime;
   const auto t_end = std::chrono::high_resolution_clock::now();
   totTime_ += std::chrono::duration_cast<std::chrono::microseconds>(t_end - t_start).count();
+}
+
+void EventFourier::eventCD(uint64_t t, uint16_t x, uint16_t y, uint8_t polarity)
+{
+  lastEventTime_ = t;
+  for (uint8_t f_idx = 0; f_idx < NUM_FREQ; f_idx++) {
+    updateState(f_idx, x, y, t, polarity);
+  }
+  const size_t off_0 = ((y * width_ + x) * NUM_FREQ + 0) * S_NUM_FIELDS;
+  const complex_t & amp_0 = state_[off_0 + S_AMP2];
+  if (amp_0.imag() > 1.0) {  // enough time has passed
+    const size_t off_1 = ((y * width_ + x) * NUM_FREQ + 1) * S_NUM_FIELDS;
+    const complex_t & amp_1 = state_[off_1 + S_AMP2];
+    if (amp_1.imag() > 1.0) {  // test frequency is also valid
+      if (amp_1.real() > amp_0.real()) {
+        // amplitude of test freq is higher than reference freq, set ref_freq = test_freq
+        // transfer state from slot 1 -> 0
+        copyState(x, y, 1, 0);
+        // restart test frequency with random frequency;
+        initializeState(x, y, 1, getRandomFreq());
+      } else {
+        // restart test frequency with random frequency;
+        initializeState(x, y, 1, getRandomFreq());
+      }
+    }
+  }
 }
 
 void EventFourier::statistics()

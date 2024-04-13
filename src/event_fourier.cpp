@@ -15,7 +15,12 @@
 
 #include "event_fourier/event_fourier.h"
 
+#ifdef USE_CV_BRIDGE_HPP
+#include <cv_bridge/cv_bridge.hpp>
+#else
 #include <cv_bridge/cv_bridge.h>
+#endif
+
 #include <event_camera_codecs/decoder.h>
 
 #include <image_transport/image_transport.hpp>

@@ -17,7 +17,6 @@ cmake_minimum_required(VERSION 3.5)
 project(event_fourier)
 
 add_compile_options(-Wall -Wextra -Wpedantic -Werror)
-#add_compile_options(-Wall -Wextra -Wpedantic)
 
 # find dependencies
 find_package(ament_cmake REQUIRED)
@@ -39,6 +38,11 @@ set(ROS2_DEPENDENCIES
 foreach(pkg ${ROS2_DEPENDENCIES})
   find_package(${pkg} REQUIRED)
 endforeach()
+
+if(${cv_bridge_VERSION} VERSION_GREATER "3.3.0")
+  message(WARNING "using hpp")
+  add_definitions(-DUSE_CV_BRIDGE_HPP)
+endif()
 
 ament_auto_find_build_dependencies(REQUIRED ${ROS2_DEPENDENCIES})
 

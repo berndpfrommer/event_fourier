@@ -15,7 +15,12 @@
 
 #include "event_fourier/frequency_cam.h"
 
+#ifdef USE_CV_BRIDGE_HPP
+#include <cv_bridge/cv_bridge.hpp>
+#else
 #include <cv_bridge/cv_bridge.h>
+#endif
+
 #include <event_camera_codecs/decoder.h>
 #include <math.h>
 
